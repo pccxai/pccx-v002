@@ -83,3 +83,4 @@
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/pccx_types.sail | LLM/formal/sail/src/pccx_types.sail | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/prelude.sail | LLM/formal/sail/src/prelude.sail | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/tests/smoke_decode.sail | LLM/formal/sail/tests/smoke_decode.sail | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/vivado/filelist.f | LLM/scripts/filelist.f | package compile list path with BD shim removed |
