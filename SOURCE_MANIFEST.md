@@ -62,3 +62,15 @@
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/rtl/VEC_CORE/GEMV_reduction.sv | LLM/rtl/core/vec/GEMV_reduction.sv | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/rtl/VEC_CORE/GEMV_reduction_branch.sv | LLM/rtl/core/vec/GEMV_reduction_branch.sv | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/rtl/VEC_CORE/GEMV_top.sv | LLM/rtl/core/vec/GEMV_top.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/sim/run_verification.sh | LLM/sim/run_verification.sh | simulation paths updated for package layout |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_FROM_mat_result_packer.sv | LLM/tb/tb_FROM_mat_result_packer.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_GEMM_dsp_packer_sign_recovery.sv | LLM/tb/tb_GEMM_dsp_packer_sign_recovery.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_GEMM_fmap_staggered_delay.sv | LLM/tb/tb_GEMM_fmap_staggered_delay.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_GEMM_weight_dispatcher.sv | LLM/tb/tb_GEMM_weight_dispatcher.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_barrel_shifter_BF16.sv | LLM/tb/tb_barrel_shifter_BF16.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_ctrl_npu_decoder.sv | LLM/tb/tb_ctrl_npu_decoder.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_mat_result_normalizer.sv | LLM/tb/tb_mat_result_normalizer.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_mem_dispatcher_shape_lookup.sv | LLM/tb/tb_mem_dispatcher_shape_lookup.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_mem_u_operation_queue.sv | LLM/tb/tb_mem_u_operation_queue.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_shape_const_ram.sv | LLM/tb/tb_shape_const_ram.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_v002_runtime_smoke_program.sv | LLM/tb/tb_v002_runtime_smoke_program.sv | none |
