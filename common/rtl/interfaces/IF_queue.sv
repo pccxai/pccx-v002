@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| Interface: IF_queue — FIFO "object" with producer/consumer modports |====
 // Purpose      : Encapsulate FIFO storage + handshake plumbing behind a
 //                single interface so producers and consumers don't have to

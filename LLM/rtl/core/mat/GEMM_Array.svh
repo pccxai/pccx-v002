@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| GEMM_Array.svh (compatibility shim) |====================================
 // Historically this file defined ARRAY_SIZE_H / ARRAY_SIZE_V independently.
 // Single-source the values from npu_arch.svh to avoid redefinition warnings

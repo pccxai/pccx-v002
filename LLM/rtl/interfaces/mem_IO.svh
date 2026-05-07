@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| Memory Port Mode Constants |==============================================
 // Used by mem_GLOBAL_cache and mem_dispatcher to distinguish read vs. write
 // accesses on the ACP and NPU ports.

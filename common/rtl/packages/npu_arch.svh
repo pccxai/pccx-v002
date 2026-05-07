@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| NPU Architecture Macros |=================================================
 // NPU-level architectural constants that must be `define (used in port
 // declarations and generate ranges, where localparams cannot be used).

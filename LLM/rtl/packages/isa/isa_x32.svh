@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 package isa_x32;
   `define X32_HEADSIZE 6
   typedef logic [16:0] dest_addr_t;

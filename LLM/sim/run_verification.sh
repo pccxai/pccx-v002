@@ -1,4 +1,8 @@
 #!/usr/bin/env bash
+# PCCX(TM) — reusable AI accelerator project.
+# SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+# SPDX-License-Identifier: Apache-2.0
+
 # Unified verification runner for the pccx-v002 LLM package.
 #
 # Runs every known testbench in deterministic order and reports a one-line

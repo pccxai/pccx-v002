@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 `timescale 1ns / 1ps
 
 // ===| Module: GEMM_weight_dispatcher — dual-lane INT4 weight register stage |==

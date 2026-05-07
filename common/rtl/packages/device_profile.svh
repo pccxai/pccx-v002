@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| Device Profile Hardware Parameters |=====================================
 // Physical hardware constants for the active implementation profile.
 // To target a different device profile, replace or override this file only.
