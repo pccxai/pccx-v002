@@ -74,3 +74,12 @@
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_mem_u_operation_queue.sv | LLM/tb/tb_mem_u_operation_queue.sv | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_shape_const_ram.sv | LLM/tb/tb_shape_const_ram.sv | none |
 | pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | hw/tb/tb_v002_runtime_smoke_program.sv | LLM/tb/tb_v002_runtime_smoke_program.sv | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/Makefile | LLM/formal/sail/Makefile | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/README.md | LLM/formal/sail/README.md | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/pccx.sail_project | LLM/formal/sail/pccx.sail_project | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/pccx_decode.sail | LLM/formal/sail/src/pccx_decode.sail | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/pccx_execute.sail | LLM/formal/sail/src/pccx_execute.sail | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/pccx_regs.sail | LLM/formal/sail/src/pccx_regs.sail | target-model example removed from copied comment |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/pccx_types.sail | LLM/formal/sail/src/pccx_types.sail | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/src/prelude.sail | LLM/formal/sail/src/prelude.sail | none |
+| pccx-FPGA-NPU-LLM-kv260 | 18d4631f54721684ef6747bc37cf8538653a7a9e | formal/sail/tests/smoke_decode.sail | LLM/formal/sail/tests/smoke_decode.sail | none |
