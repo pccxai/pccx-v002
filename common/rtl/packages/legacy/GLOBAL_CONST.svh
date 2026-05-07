@@ -1,3 +1,7 @@
+// PCCX(TM) — reusable AI accelerator project.
+// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
+// SPDX-License-Identifier: Apache-2.0
+
 // ===| DEPRECATED — use npu_arch.svh + device_profile.svh instead |===============
 // This file is kept as a compatibility shim so existing `include "GLOBAL_CONST.svh"
 // statements continue to work during the migration period.
