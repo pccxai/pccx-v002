@@ -51,6 +51,7 @@ module Global_Scheduler #() (
     output gemm_control_uop_t   OUT_GEMM_uop,
     output GEMV_control_uop_t   OUT_GEMV_uop,
     output memory_control_uop_t OUT_LOAD_uop,
+    output logic                OUT_LOAD_uop_valid,
     output memory_control_uop_t OUT_STORE_uop,
     output memory_set_uop_t     OUT_mem_set_uop,
     output cvo_control_uop_t    OUT_CVO_uop,
@@ -100,12 +101,19 @@ module Global_Scheduler #() (
   end
 
   // ===| LOAD uop — single driver (priority: GEMM > GEMV > MEMCPY > CVO) |======
+  // OUT_LOAD_uop_valid is a 1-cycle pulse asserted in lockstep with the
+  // OUT_LOAD_uop register update. Downstream (mem_dispatcher) must gate its
+  // dest-routing case on this pulse so that non-LOAD opcodes do not propagate
+  // the stale LOAD_uop value, which otherwise causes mem_GLOBAL_cache to
+  // latch garbage uops and stick `npu_is_busy` permanently.
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
-      OUT_LOAD_uop      <= '0;
-      OUT_sram_rd_start <= 1'b0;
+      OUT_LOAD_uop       <= '0;
+      OUT_LOAD_uop_valid <= 1'b0;
+      OUT_sram_rd_start  <= 1'b0;
     end else begin
-      OUT_sram_rd_start <= 1'b0;   // default: no pulse
+      OUT_LOAD_uop_valid <= 1'b0;   // default: no pulse
+      OUT_sram_rd_start  <= 1'b0;   // default: no pulse
 
       if (IN_GEMM_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -115,7 +123,8 @@ module Global_Scheduler #() (
             shape_ptr_addr : GEMM_op_x64.shape_ptr_addr,
             async          : SYNC_OP
         };
-        OUT_sram_rd_start <= 1'b1;
+        OUT_LOAD_uop_valid <= 1'b1;
+        OUT_sram_rd_start  <= 1'b1;
 
       end else if (IN_GEMV_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -125,7 +134,8 @@ module Global_Scheduler #() (
             shape_ptr_addr : GEMV_op_x64.shape_ptr_addr,
             async          : SYNC_OP
         };
-        OUT_sram_rd_start <= 1'b1;
+        OUT_LOAD_uop_valid <= 1'b1;
+        OUT_sram_rd_start  <= 1'b1;
 
       end else if (IN_memcpy_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -135,6 +145,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : memcpy_op_x64.shape_ptr_addr,
             async          : memcpy_op_x64.async
         };
+        OUT_LOAD_uop_valid <= 1'b1;
 
       end else if (IN_cvo_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -144,6 +155,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : '0,
             async          : cvo_op_x64.async
         };
+        OUT_LOAD_uop_valid <= 1'b1;
       end
     end
   end

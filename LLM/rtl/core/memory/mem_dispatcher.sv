@@ -50,6 +50,7 @@ module mem_dispatcher #() (
 
     // ===| Engine uop inputs |===================================================
     input  memory_control_uop_t IN_LOAD_uop,
+    input  logic                IN_LOAD_uop_valid,
     input  memory_set_uop_t     IN_mem_set_uop,
     input  cvo_control_uop_t    IN_CVO_uop,
     input  logic                IN_cvo_uop_valid,
@@ -216,56 +217,63 @@ module mem_dispatcher #() (
       IN_acp_rdy   <= 1'b0;
       IN_npu_rdy   <= 1'b0;
 
-      case (IN_LOAD_uop.data_dest)
-        // Host DDR4 → L2 (feature map DMA in)
-        from_host_to_L2: begin
-          acp_uop <= '{
-              write_en  : `PORT_MOD_E_WRITE,
-              base_addr : IN_LOAD_uop.dest_addr,
-              end_addr  : IN_LOAD_uop.dest_addr + 17'(fmap_word_total)
-          };
-          acp_rx_start <= 1'b1;
-          IN_acp_rdy   <= 1'b1;
-        end
+      // Gate dest-routing decode on IN_LOAD_uop_valid. Without this gate the
+      // stale IN_LOAD_uop value re-triggers the case for every non-LOAD
+      // opcode (which leaves OUT_LOAD_uop untouched in Global_Scheduler),
+      // causing the mem_GLOBAL_cache NPU FSM to latch garbage uops and
+      // hang npu_is_busy permanently.
+      if (IN_LOAD_uop_valid) begin
+        case (IN_LOAD_uop.data_dest)
+          // Host DDR4 → L2 (feature map DMA in)
+          from_host_to_L2: begin
+            acp_uop <= '{
+                write_en  : `PORT_MOD_E_WRITE,
+                base_addr : IN_LOAD_uop.dest_addr,
+                end_addr  : IN_LOAD_uop.dest_addr + 17'(fmap_word_total)
+            };
+            acp_rx_start <= 1'b1;
+            IN_acp_rdy   <= 1'b1;
+          end
 
-        // L2 → host DDR4 (result DMA out)
-        from_L2_to_host: begin
-          acp_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
-          };
-          acp_rx_start <= 1'b1;
-          IN_acp_rdy   <= 1'b1;
-        end
+          // L2 → host DDR4 (result DMA out)
+          from_L2_to_host: begin
+            acp_uop <= '{
+                write_en  : `PORT_MOD_E_READ,
+                base_addr : IN_LOAD_uop.src_addr,
+                end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
+            };
+            acp_rx_start <= 1'b1;
+            IN_acp_rdy   <= 1'b1;
+          end
 
-        // L2 → GEMM fmap broadcast
-        from_L2_to_L1_GEMM: begin
-          npu_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
-          };
-          npu_rx_start <= 1'b1;
-          IN_npu_rdy   <= 1'b1;
-        end
+          // L2 → GEMM fmap broadcast
+          from_L2_to_L1_GEMM: begin
+            npu_uop <= '{
+                write_en  : `PORT_MOD_E_READ,
+                base_addr : IN_LOAD_uop.src_addr,
+                end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
+            };
+            npu_rx_start <= 1'b1;
+            IN_npu_rdy   <= 1'b1;
+          end
 
-        // L2 → GEMV fmap broadcast
-        from_L2_to_L1_GEMV: begin
-          npu_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
-          };
-          npu_rx_start <= 1'b1;
-          IN_npu_rdy   <= 1'b1;
-        end
+          // L2 → GEMV fmap broadcast
+          from_L2_to_L1_GEMV: begin
+            npu_uop <= '{
+                write_en  : `PORT_MOD_E_READ,
+                base_addr : IN_LOAD_uop.src_addr,
+                end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
+            };
+            npu_rx_start <= 1'b1;
+            IN_npu_rdy   <= 1'b1;
+          end
 
-        // L2 → CVO input (handled by mem_CVO_stream_bridge below)
-        from_L2_to_CVO: ;  // bridge watches IN_CVO_uop directly
+          // L2 → CVO input (handled by mem_CVO_stream_bridge below)
+          from_L2_to_CVO: ;  // bridge watches IN_CVO_uop directly
 
-        default: ;
-      endcase
+          default: ;
+        endcase
+      end
     end
   end
 

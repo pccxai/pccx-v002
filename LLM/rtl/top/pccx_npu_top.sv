@@ -111,6 +111,7 @@ module pccx_npu_top (
   memory_set_uop_t     mem_set_uop;
   cvo_control_uop_t    CVO_uop_wire;
   logic                sram_rd_start_wire;  // one-cycle pulse: start fmap broadcast
+  logic                LOAD_uop_valid_wire; // one-cycle pulse: gates LOAD_uop case in mem_dispatcher
 
   Global_Scheduler #() u_Global_Scheduler (
       .clk_core  (clk_core),
@@ -124,13 +125,14 @@ module pccx_npu_top (
 
       .instruction(instruction),
 
-      .OUT_GEMM_uop     (GEMM_uop_wire),
-      .OUT_GEMV_uop     (GEMV_uop_wire),
-      .OUT_LOAD_uop     (LOAD_uop_wire),
-      .OUT_STORE_uop    (STORE_uop_wire),
-      .OUT_mem_set_uop  (mem_set_uop),
-      .OUT_CVO_uop      (CVO_uop_wire),
-      .OUT_sram_rd_start(sram_rd_start_wire)
+      .OUT_GEMM_uop      (GEMM_uop_wire),
+      .OUT_GEMV_uop      (GEMV_uop_wire),
+      .OUT_LOAD_uop      (LOAD_uop_wire),
+      .OUT_LOAD_uop_valid(LOAD_uop_valid_wire),
+      .OUT_STORE_uop     (STORE_uop_wire),
+      .OUT_mem_set_uop   (mem_set_uop),
+      .OUT_CVO_uop       (CVO_uop_wire),
+      .OUT_sram_rd_start (sram_rd_start_wire)
   );
 
   // ===| [3] Memory Dispatcher |=================================================
@@ -153,10 +155,11 @@ module pccx_npu_top (
       .S_AXIS_ACP_FMAP  (S_AXIS_ACP_FMAP),
       .M_AXIS_ACP_RESULT(M_AXIS_ACP_RESULT),
 
-      .IN_LOAD_uop     (LOAD_uop_wire),
-      .IN_mem_set_uop  (mem_set_uop),
-      .IN_CVO_uop      (CVO_uop_wire),
-      .IN_cvo_uop_valid(cvo_op_x64_valid_wire),
+      .IN_LOAD_uop      (LOAD_uop_wire),
+      .IN_LOAD_uop_valid(LOAD_uop_valid_wire),
+      .IN_mem_set_uop   (mem_set_uop),
+      .IN_CVO_uop       (CVO_uop_wire),
+      .IN_cvo_uop_valid (cvo_op_x64_valid_wire),
 
       .OUT_cvo_data     (cvo_disp_data_wire),
       .OUT_cvo_valid    (cvo_disp_valid_wire),
