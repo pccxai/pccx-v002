@@ -38,9 +38,14 @@ module tb_mem_dispatcher_shape_lookup;
   // ===| DUT IO |===============================================================
   axis_if #(.DATA_WIDTH(128)) s_axis_acp_fmap ();
   axis_if #(.DATA_WIDTH(128)) m_axis_acp_result ();
+  axis_if #(.DATA_WIDTH(128)) m_axis_l1_fmap ();
 
   memory_control_uop_t load_uop;
+  logic                load_uop_valid;
+  memory_control_uop_t store_uop;
+  logic                store_uop_valid;
   memory_set_uop_t     mem_set_uop;
+  logic                mem_set_uop_valid;
   cvo_control_uop_t    cvo_uop;
   logic                cvo_uop_valid;
 
@@ -50,8 +55,15 @@ module tb_mem_dispatcher_shape_lookup;
   logic [15:0] cvo_result;
   logic        cvo_result_valid;
   logic        cvo_result_ready;
+  logic [127:0] gemm_result_data;
+  logic                         gemm_result_valid;
+  logic                         gemm_result_ready;
   logic        fifo_full;
   logic        cvo_busy;
+  logic        store_busy;
+  logic        store_done;
+  logic        memset_done;
+  logic [15:0] debug_status;
 
   mem_dispatcher dut (
       .clk_core            (clk_core),
@@ -60,8 +72,13 @@ module tb_mem_dispatcher_shape_lookup;
       .rst_axi_n           (rst_axi_n),
       .S_AXIS_ACP_FMAP     (s_axis_acp_fmap),
       .M_AXIS_ACP_RESULT   (m_axis_acp_result),
+      .M_AXIS_L1_FMAP      (m_axis_l1_fmap),
       .IN_LOAD_uop         (load_uop),
+      .IN_LOAD_uop_valid   (load_uop_valid),
+      .IN_STORE_uop        (store_uop),
+      .IN_store_uop_valid  (store_uop_valid),
       .IN_mem_set_uop      (mem_set_uop),
+      .IN_mem_set_uop_valid(mem_set_uop_valid),
       .IN_CVO_uop          (cvo_uop),
       .IN_cvo_uop_valid    (cvo_uop_valid),
       .OUT_cvo_data        (cvo_data),
@@ -70,8 +87,15 @@ module tb_mem_dispatcher_shape_lookup;
       .IN_cvo_result       (cvo_result),
       .IN_cvo_result_valid (cvo_result_valid),
       .OUT_cvo_result_ready(cvo_result_ready),
+      .IN_gemm_result_data (gemm_result_data),
+      .IN_gemm_result_valid(gemm_result_valid),
+      .OUT_gemm_result_ready(gemm_result_ready),
       .OUT_fifo_full       (fifo_full),
-      .OUT_cvo_busy        (cvo_busy)
+      .OUT_cvo_busy        (cvo_busy),
+      .OUT_store_busy      (store_busy),
+      .OUT_store_done      (store_done),
+      .OUT_memset_done     (memset_done),
+      .OUT_debug_status    (debug_status)
   );
 
   // ===| Scoreboard |===========================================================
@@ -152,7 +176,10 @@ module tb_mem_dispatcher_shape_lookup;
           b_value    : y_val,
           c_value    : z_val
       };
-      repeat (2) @(posedge clk_core);
+      mem_set_uop_valid = 1'b1;
+      @(posedge clk_core);
+      mem_set_uop_valid = 1'b0;
+      @(posedge clk_core);
       set_memset_idle();
       @(posedge clk_core);
       #1;
@@ -181,8 +208,16 @@ module tb_mem_dispatcher_shape_lookup;
           shape_ptr_addr : shape_ptr,
           async          : SYNC_OP
       };
+      load_uop_valid = 1'b1;
       @(posedge clk_core);
+      load_uop_valid = 1'b0;
       #1;
+
+      for (int i = 0; i < 20; i++) begin
+        if (dut.acp_rx_start === 1'b1) break;
+        @(posedge clk_core);
+        #1;
+      end
 
       checks++;
       if (dut.acp_rx_start !== 1'b1) begin
@@ -226,8 +261,16 @@ module tb_mem_dispatcher_shape_lookup;
           shape_ptr_addr : shape_ptr,
           async          : SYNC_OP
       };
+      load_uop_valid = 1'b1;
       @(posedge clk_core);
+      load_uop_valid = 1'b0;
       #1;
+
+      for (int i = 0; i < 20; i++) begin
+        if (dut.npu_rx_start === 1'b1) break;
+        @(posedge clk_core);
+        #1;
+      end
 
       checks++;
       if (dut.npu_rx_start !== 1'b1) begin
@@ -259,7 +302,11 @@ module tb_mem_dispatcher_shape_lookup;
     rst_axi_n  = 1'b0;
 
     set_load_idle();
+    load_uop_valid = 1'b0;
+    store_uop = '0;
+    store_uop_valid = 1'b0;
     set_memset_idle();
+    mem_set_uop_valid = 1'b0;
     cvo_uop             = '0;
     cvo_uop_valid       = 1'b0;
     cvo_data_ready      = 1'b1;
@@ -270,6 +317,9 @@ module tb_mem_dispatcher_shape_lookup;
     s_axis_acp_fmap.tlast  = 1'b0;
     s_axis_acp_fmap.tkeep  = '1;
     m_axis_acp_result.tready = 1'b1;
+    m_axis_l1_fmap.tready = 1'b1;
+    gemm_result_data = '0;
+    gemm_result_valid = 1'b0;
 
     repeat (4) @(posedge clk_core);
     rst_n_core = 1'b1;

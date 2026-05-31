@@ -38,7 +38,8 @@ import isa_pkg::*;
 //                final_npu_we.
 // ===============================================================================
 
-module mem_dispatcher #() (
+module mem_dispatcher #(
+) (
     input logic clk_core,
     input logic rst_n_core,
     input logic clk_axi,
@@ -47,12 +48,17 @@ module mem_dispatcher #() (
     // ===| AXI-Stream ACP (external) |==========================================
     axis_if.slave  S_AXIS_ACP_FMAP,
     axis_if.master M_AXIS_ACP_RESULT,
+    axis_if.master M_AXIS_L1_FMAP,
 
     // ===| Engine uop inputs |===================================================
-    input  memory_control_uop_t IN_LOAD_uop,
-    input  memory_set_uop_t     IN_mem_set_uop,
-    input  cvo_control_uop_t    IN_CVO_uop,
-    input  logic                IN_cvo_uop_valid,
+    input memory_control_uop_t IN_LOAD_uop,
+    input logic                IN_LOAD_uop_valid,
+    input memory_control_uop_t IN_STORE_uop,
+    input logic                IN_store_uop_valid,
+    input memory_set_uop_t     IN_mem_set_uop,
+    input logic                IN_mem_set_uop_valid,
+    input cvo_control_uop_t    IN_CVO_uop,
+    input logic                IN_cvo_uop_valid,
 
     // ===| CVO streaming ports (to/from CVO_top) |==============================
     output logic [15:0] OUT_cvo_data,
@@ -63,9 +69,18 @@ module mem_dispatcher #() (
     input  logic        IN_cvo_result_valid,
     output logic        OUT_cvo_result_ready,
 
+    // ===| Packed compute results (from GEMM result packer) |====================
+    input  logic [`AXI_STREAM_WIDTH-1:0] IN_gemm_result_data,
+    input  logic                         IN_gemm_result_valid,
+    output logic                         OUT_gemm_result_ready,
+
     // ===| Status |=============================================================
     output logic OUT_fifo_full,
-    output logic OUT_cvo_busy
+    output logic OUT_cvo_busy,
+    output logic OUT_store_busy,
+    output logic OUT_store_done,
+    output logic OUT_memset_done,
+    output logic [15:0] OUT_debug_status
 );
 
   // ===| FIFO full aggregation |=================================================
@@ -81,32 +96,74 @@ module mem_dispatcher #() (
   // and the LOAD-uop handler (read side) drive independent flops; sharing a
   // single signal across two always_ff blocks tripped xelab's
   // multi-driver check.
-  logic        fmap_write_enable;
-  logic [ 5:0] fmap_shape_wr_addr;
-  logic [ 5:0] fmap_shape_rd_addr;
-  logic [16:0] fmap_arr_shape_X;
-  logic [16:0] fmap_arr_shape_Y;
-  logic [16:0] fmap_arr_shape_Z;
-  shape_xyz_t  fmap_shape_wr_xyz;
-  shape_xyz_t  fmap_shape_rd_xyz;
-  logic [16:0] fmap_read_arr_shape_X;
-  logic [16:0] fmap_read_arr_shape_Y;
-  logic [16:0] fmap_read_arr_shape_Z;
+  logic              fmap_write_enable;
+  logic       [ 5:0] fmap_shape_wr_addr;
+  logic       [ 5:0] fmap_shape_rd_addr;
+  logic       [16:0] fmap_arr_shape_X;
+  logic       [16:0] fmap_arr_shape_Y;
+  logic       [16:0] fmap_arr_shape_Z;
+  shape_xyz_t        fmap_shape_wr_xyz;
+  shape_xyz_t        fmap_shape_rd_xyz;
+  logic       [16:0] fmap_read_arr_shape_X;
+  logic       [16:0] fmap_read_arr_shape_Y;
+  logic       [16:0] fmap_read_arr_shape_Z;
 
   // ===| Shape Constant RAM — Weight |===========================================
-  logic        weight_write_enable;
-  logic [ 5:0] weight_shape_wr_addr;
-  logic [ 5:0] weight_shape_rd_addr;
-  logic [16:0] weight_arr_shape_X;
-  logic [16:0] weight_arr_shape_Y;
-  logic [16:0] weight_arr_shape_Z;
-  shape_xyz_t  weight_shape_wr_xyz;
-  shape_xyz_t  weight_shape_rd_xyz;
-  logic [16:0] weight_read_arr_shape_X;
-  logic [16:0] weight_read_arr_shape_Y;
-  logic [16:0] weight_read_arr_shape_Z;
+  logic              weight_write_enable;
+  logic       [ 5:0] weight_shape_wr_addr;
+  logic       [ 5:0] weight_shape_rd_addr;
+  logic       [16:0] weight_arr_shape_X;
+  logic       [16:0] weight_arr_shape_Y;
+  logic       [16:0] weight_arr_shape_Z;
+  shape_xyz_t        weight_shape_wr_xyz;
+  shape_xyz_t        weight_shape_rd_xyz;
+  logic       [16:0] weight_read_arr_shape_X;
+  logic       [16:0] weight_read_arr_shape_Y;
+  logic       [16:0] weight_read_arr_shape_Z;
 
   // ===| MEMSET handler |========================================================
+  always_comb begin
+    fmap_write_enable    = 1'b0;
+    weight_write_enable  = 1'b0;
+    OUT_memset_done      = 1'b0;
+
+    fmap_shape_wr_addr   = '0;
+    weight_shape_wr_addr = '0;
+
+    fmap_arr_shape_X     = '0;
+    fmap_arr_shape_Y     = '0;
+    fmap_arr_shape_Z     = '0;
+
+    weight_arr_shape_X   = '0;
+    weight_arr_shape_Y   = '0;
+    weight_arr_shape_Z   = '0;
+
+    if (IN_mem_set_uop_valid) begin
+      unique case (IN_mem_set_uop.dest_cache)
+        data_to_fmap_shape: begin
+          fmap_shape_wr_addr = IN_mem_set_uop.dest_addr;
+          fmap_arr_shape_X   = IN_mem_set_uop.a_value;
+          fmap_arr_shape_Y   = IN_mem_set_uop.b_value;
+          fmap_arr_shape_Z   = IN_mem_set_uop.c_value;
+          fmap_write_enable  = 1'b1;
+          OUT_memset_done    = 1'b1;
+        end
+
+        data_to_weight_shape: begin
+          weight_shape_wr_addr = IN_mem_set_uop.dest_addr;
+          weight_arr_shape_X   = IN_mem_set_uop.a_value;
+          weight_arr_shape_Y   = IN_mem_set_uop.b_value;
+          weight_arr_shape_Z   = IN_mem_set_uop.c_value;
+          weight_write_enable  = 1'b1;
+          OUT_memset_done      = 1'b1;
+        end
+
+        default: begin
+        end
+      endcase
+    end
+  end
+  /*
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
       fmap_write_enable   <= 1'b0;
@@ -123,27 +180,30 @@ module mem_dispatcher #() (
       fmap_write_enable   <= 1'b0;
       weight_write_enable <= 1'b0;
 
-      case (IN_mem_set_uop.dest_cache)
-        data_to_fmap_shape: begin
-          fmap_shape_wr_addr <= IN_mem_set_uop.dest_addr;
-          fmap_arr_shape_X   <= IN_mem_set_uop.a_value;
-          fmap_arr_shape_Y   <= IN_mem_set_uop.b_value;
-          fmap_arr_shape_Z   <= IN_mem_set_uop.c_value;
-          fmap_write_enable  <= 1'b1;
-        end
+      if (IN_mem_set_uop_valid) begin
+        case (IN_mem_set_uop.dest_cache)
+          data_to_fmap_shape: begin
+            fmap_shape_wr_addr <= IN_mem_set_uop.dest_addr;
+            fmap_arr_shape_X   <= IN_mem_set_uop.a_value;
+            fmap_arr_shape_Y   <= IN_mem_set_uop.b_value;
+            fmap_arr_shape_Z   <= IN_mem_set_uop.c_value;
+            fmap_write_enable  <= 1'b1;
+          end
 
-        data_to_weight_shape: begin
-          weight_shape_wr_addr <= IN_mem_set_uop.dest_addr;
-          weight_arr_shape_X   <= IN_mem_set_uop.a_value;
-          weight_arr_shape_Y   <= IN_mem_set_uop.b_value;
-          weight_arr_shape_Z   <= IN_mem_set_uop.c_value;
-          weight_write_enable  <= 1'b1;
-        end
+          data_to_weight_shape: begin
+            weight_shape_wr_addr <= IN_mem_set_uop.dest_addr;
+            weight_arr_shape_X   <= IN_mem_set_uop.a_value;
+            weight_arr_shape_Y   <= IN_mem_set_uop.b_value;
+            weight_arr_shape_Z   <= IN_mem_set_uop.c_value;
+            weight_write_enable  <= 1'b1;
+          end
 
-        default: ;
-      endcase
+          default: ;
+        endcase
+      end
     end
   end
+  */
 
   // Shape RAM reads are combinational. Keep read pointers on the current
   // consumer input so a one-cycle LOAD uses its own shape_ptr_addr rather
@@ -153,9 +213,9 @@ module mem_dispatcher #() (
     weight_shape_rd_addr = IN_mem_set_uop.dest_addr;
   end
 
-  assign fmap_shape_wr_xyz.x = fmap_arr_shape_X;
-  assign fmap_shape_wr_xyz.y = fmap_arr_shape_Y;
-  assign fmap_shape_wr_xyz.z = fmap_arr_shape_Z;
+  assign fmap_shape_wr_xyz.x   = fmap_arr_shape_X;
+  assign fmap_shape_wr_xyz.y   = fmap_arr_shape_Y;
+  assign fmap_shape_wr_xyz.z   = fmap_arr_shape_Z;
   assign fmap_read_arr_shape_X = fmap_shape_rd_xyz.x;
   assign fmap_read_arr_shape_Y = fmap_shape_rd_xyz.y;
   assign fmap_read_arr_shape_Z = fmap_shape_rd_xyz.z;
@@ -170,9 +230,9 @@ module mem_dispatcher #() (
       .rd_xyz(fmap_shape_rd_xyz)
   );
 
-  assign weight_shape_wr_xyz.x = weight_arr_shape_X;
-  assign weight_shape_wr_xyz.y = weight_arr_shape_Y;
-  assign weight_shape_wr_xyz.z = weight_arr_shape_Z;
+  assign weight_shape_wr_xyz.x   = weight_arr_shape_X;
+  assign weight_shape_wr_xyz.y   = weight_arr_shape_Y;
+  assign weight_shape_wr_xyz.z   = weight_arr_shape_Z;
   assign weight_read_arr_shape_X = weight_shape_rd_xyz.x;
   assign weight_read_arr_shape_Y = weight_shape_rd_xyz.y;
   assign weight_read_arr_shape_Z = weight_shape_rd_xyz.z;
@@ -187,85 +247,275 @@ module mem_dispatcher #() (
       .rd_xyz(weight_shape_rd_xyz)
   );
 
-  // ===| Shape totals (word counts for DMA) |====================================
-  logic [16:0] fmap_word_total;
-  logic [16:0] weight_word_total;
-
-  // Total BF16 elements → 128-bit words: ceil(X*Y*Z / 8)
-  assign fmap_word_total   = (fmap_read_arr_shape_X   * fmap_read_arr_shape_Y   * fmap_read_arr_shape_Z   + 7) >> 3;
-  assign weight_word_total = (weight_read_arr_shape_X * weight_read_arr_shape_Y * weight_read_arr_shape_Z + 7) >> 3;
-
   // ===| LOAD uop → ACP / NPU command translation |==============================
-  logic    IN_acp_rdy;
-  acp_uop_t acp_uop;
-  logic    acp_rx_start;
+  // The shape RAM returns BF16 element dimensions, but ACP/NPU commands need
+  // 128-bit word counts. Keep that arithmetic behind a registered boundary:
+  //   s1: capture route/base/shape
+  //   s2: compute X*Y
+  //   s3: keep the low product operands required by the 17-bit word contract
+  //   s4: register low X*Y and Z from the first product DSP
+  //   s5: register operands at the second product DSP input boundary
+  //   s6: compute low 20 bits of X*Y*Z
+  //   s7: compute ceil(X*Y*Z/8) and enqueue descriptor
+  //   issue: enqueue ACP/NPU descriptor
+  // This removes the prior shape_const_ram -> DSP -> DSP -> descriptor path
+  // from the 400 MHz core cycle while preserving the external command contract.
+  logic            IN_acp_rdy;
+  acp_uop_t        acp_uop;
+  logic            acp_rx_start;
 
-  logic    IN_npu_rdy;
-  npu_uop_t npu_uop;
-  logic    npu_rx_start;
+  logic            IN_npu_rdy;
+  npu_uop_t        npu_uop;
+  logic            npu_rx_start;
+
+  logic            load_s1_valid;
+  logic            load_s1_to_acp;
+  logic            load_s1_to_npu;
+  logic            load_s1_write_en;
+  logic     [16:0] load_s1_base_addr;
+  logic     [16:0] load_s1_shape_x;
+  logic     [16:0] load_s1_shape_y;
+  logic     [16:0] load_s1_shape_z;
+
+  logic            load_s2_valid;
+  logic            load_s2_to_acp;
+  logic            load_s2_to_npu;
+  logic            load_s2_write_en;
+  logic     [16:0] load_s2_base_addr;
+  logic     [33:0] load_s2_shape_xy;
+  logic     [16:0] load_s2_shape_z;
+
+  logic            load_s3_valid;
+  logic            load_s3_to_acp;
+  logic            load_s3_to_npu;
+  logic            load_s3_write_en;
+  logic     [16:0] load_s3_base_addr;
+  logic     [19:0] load_s3_shape_xy_low;
+  logic     [16:0] load_s3_shape_z;
+
+  logic            load_s4_valid;
+  logic            load_s4_to_acp;
+  logic            load_s4_to_npu;
+  logic            load_s4_write_en;
+  logic     [16:0] load_s4_base_addr;
+  logic     [19:0] load_s4_shape_xy_low;
+  logic     [16:0] load_s4_shape_z;
+
+  logic            load_s5_valid;
+  logic            load_s5_to_acp;
+  logic            load_s5_to_npu;
+  logic            load_s5_write_en;
+  logic     [16:0] load_s5_base_addr;
+  logic     [19:0] load_s5_shape_xy_low;
+  logic     [16:0] load_s5_shape_z;
+  logic     [36:0] load_s5_elem_low_product;
+
+  logic            load_s6_valid;
+  logic            load_s6_to_acp;
+  logic            load_s6_to_npu;
+  logic            load_s6_write_en;
+  logic     [16:0] load_s6_base_addr;
+  logic     [19:0] load_s6_elem_low20;
+  logic     [16:0] load_s6_word_floor;
+  logic            load_s6_word_round;
+
+  logic            load_s7_valid;
+  logic            load_s7_to_acp;
+  logic            load_s7_to_npu;
+  logic            load_s7_write_en;
+  logic     [16:0] load_s7_base_addr;
+  logic     [16:0] load_s7_word_total;
+
+  assign load_s5_elem_low_product = load_s5_shape_xy_low * load_s5_shape_z;
+  assign load_s6_word_floor       = load_s6_elem_low20[19:3];
+  assign load_s6_word_round       = |load_s6_elem_low20[2:0];
 
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
-      acp_rx_start <= 1'b0;
-      npu_rx_start <= 1'b0;
-      IN_acp_rdy   <= 1'b0;
-      IN_npu_rdy   <= 1'b0;
+      acp_rx_start         <= 1'b0;
+      npu_rx_start         <= 1'b0;
+      IN_acp_rdy           <= 1'b0;
+      IN_npu_rdy           <= 1'b0;
+      acp_uop              <= '0;
+      npu_uop              <= '0;
+      load_s1_valid        <= 1'b0;
+      load_s1_to_acp       <= 1'b0;
+      load_s1_to_npu       <= 1'b0;
+      load_s1_write_en     <= 1'b0;
+      load_s1_base_addr    <= '0;
+      load_s1_shape_x      <= '0;
+      load_s1_shape_y      <= '0;
+      load_s1_shape_z      <= '0;
+      load_s2_valid        <= 1'b0;
+      load_s2_to_acp       <= 1'b0;
+      load_s2_to_npu       <= 1'b0;
+      load_s2_write_en     <= 1'b0;
+      load_s2_base_addr    <= '0;
+      load_s2_shape_xy     <= '0;
+      load_s2_shape_z      <= '0;
+      load_s3_valid        <= 1'b0;
+      load_s3_to_acp       <= 1'b0;
+      load_s3_to_npu       <= 1'b0;
+      load_s3_write_en     <= 1'b0;
+      load_s3_base_addr    <= '0;
+      load_s3_shape_xy_low <= '0;
+      load_s3_shape_z      <= '0;
+      load_s4_valid        <= 1'b0;
+      load_s4_to_acp       <= 1'b0;
+      load_s4_to_npu       <= 1'b0;
+      load_s4_write_en     <= 1'b0;
+      load_s4_base_addr    <= '0;
+      load_s4_shape_xy_low <= '0;
+      load_s4_shape_z      <= '0;
+      load_s5_valid        <= 1'b0;
+      load_s5_to_acp       <= 1'b0;
+      load_s5_to_npu       <= 1'b0;
+      load_s5_write_en     <= 1'b0;
+      load_s5_base_addr    <= '0;
+      load_s5_shape_xy_low <= '0;
+      load_s5_shape_z      <= '0;
+      load_s6_valid        <= 1'b0;
+      load_s6_to_acp       <= 1'b0;
+      load_s6_to_npu       <= 1'b0;
+      load_s6_write_en     <= 1'b0;
+      load_s6_base_addr    <= '0;
+      load_s6_elem_low20   <= '0;
+      load_s7_valid        <= 1'b0;
+      load_s7_to_acp       <= 1'b0;
+      load_s7_to_npu       <= 1'b0;
+      load_s7_write_en     <= 1'b0;
+      load_s7_base_addr    <= '0;
+      load_s7_word_total   <= '0;
     end else begin
-      acp_rx_start <= 1'b0;
-      npu_rx_start <= 1'b0;
-      IN_acp_rdy   <= 1'b0;
-      IN_npu_rdy   <= 1'b0;
+      acp_rx_start      <= 1'b0;
+      npu_rx_start      <= 1'b0;
+      IN_acp_rdy        <= 1'b0;
+      IN_npu_rdy        <= 1'b0;
 
-      case (IN_LOAD_uop.data_dest)
-        // Host DDR4 → L2 (feature map DMA in)
-        from_host_to_L2: begin
+      load_s1_valid     <= 1'b0;
+      load_s1_to_acp    <= 1'b0;
+      load_s1_to_npu    <= 1'b0;
+      load_s1_write_en  <= 1'b0;
+      load_s1_base_addr <= '0;
+      load_s1_shape_x   <= fmap_read_arr_shape_X;
+      load_s1_shape_y   <= fmap_read_arr_shape_Y;
+      load_s1_shape_z   <= fmap_read_arr_shape_Z;
+
+      // Gate dest-routing decode on IN_LOAD_uop_valid. Without this gate the
+      // stale IN_LOAD_uop value re-triggers the pipeline every cycle for
+      // every non-LOAD opcode (RESET_KV_CACHE / NEXT_TOKEN / etc.), causing
+      // the mem_GLOBAL_cache NPU FSM to latch garbage uops and hang
+      // npu_is_busy permanently.
+      if (IN_LOAD_uop_valid) begin
+        case (IN_LOAD_uop.data_dest)
+          // Host DDR4 → L2 (feature map DMA in)
+          from_host_to_L2: begin
+            load_s1_valid     <= 1'b1;
+            load_s1_to_acp    <= 1'b1;
+            load_s1_write_en  <= `PORT_MOD_E_WRITE;
+            load_s1_base_addr <= IN_LOAD_uop.dest_addr;
+          end
+
+          // L2 → host DDR4 (result DMA out)
+          from_L2_to_host: begin
+            load_s1_valid     <= 1'b1;
+            load_s1_to_acp    <= 1'b1;
+            load_s1_write_en  <= `PORT_MOD_E_READ;
+            load_s1_base_addr <= IN_LOAD_uop.src_addr;
+          end
+
+          // L2 → GEMM fmap broadcast
+          from_L2_to_L1_GEMM: begin
+            load_s1_valid     <= 1'b1;
+            load_s1_to_npu    <= 1'b1;
+            load_s1_write_en  <= `PORT_MOD_E_READ;
+            load_s1_base_addr <= IN_LOAD_uop.src_addr;
+          end
+
+          // L2 → GEMV fmap broadcast
+          from_L2_to_L1_GEMV: begin
+            load_s1_valid     <= 1'b1;
+            load_s1_to_npu    <= 1'b1;
+            load_s1_write_en  <= `PORT_MOD_E_READ;
+            load_s1_base_addr <= IN_LOAD_uop.src_addr;
+          end
+
+          // L2 → CVO input (handled by mem_CVO_stream_bridge below)
+          from_L2_to_CVO: ;  // bridge watches IN_CVO_uop directly
+
+          default: ;
+        endcase
+      end
+
+      load_s2_valid        <= load_s1_valid;
+      load_s2_to_acp       <= load_s1_to_acp;
+      load_s2_to_npu       <= load_s1_to_npu;
+      load_s2_write_en     <= load_s1_write_en;
+      load_s2_base_addr    <= load_s1_base_addr;
+      load_s2_shape_xy     <= load_s1_shape_x * load_s1_shape_y;
+      load_s2_shape_z      <= load_s1_shape_z;
+
+      load_s3_valid        <= load_s2_valid;
+      load_s3_to_acp       <= load_s2_to_acp;
+      load_s3_to_npu       <= load_s2_to_npu;
+      load_s3_write_en     <= load_s2_write_en;
+      load_s3_base_addr    <= load_s2_base_addr;
+      load_s3_shape_xy_low <= load_s2_shape_xy[19:0];
+      load_s3_shape_z      <= load_s2_shape_z;
+
+      load_s4_valid        <= load_s3_valid;
+      load_s4_to_acp       <= load_s3_to_acp;
+      load_s4_to_npu       <= load_s3_to_npu;
+      load_s4_write_en     <= load_s3_write_en;
+      load_s4_base_addr    <= load_s3_base_addr;
+      load_s4_shape_xy_low <= load_s3_shape_xy_low;
+      load_s4_shape_z      <= load_s3_shape_z;
+
+      load_s5_valid        <= load_s4_valid;
+      load_s5_to_acp       <= load_s4_to_acp;
+      load_s5_to_npu       <= load_s4_to_npu;
+      load_s5_write_en     <= load_s4_write_en;
+      load_s5_base_addr    <= load_s4_base_addr;
+      load_s5_shape_xy_low <= load_s4_shape_xy_low;
+      load_s5_shape_z      <= load_s4_shape_z;
+
+      load_s6_valid        <= load_s5_valid;
+      load_s6_to_acp       <= load_s5_to_acp;
+      load_s6_to_npu       <= load_s5_to_npu;
+      load_s6_write_en     <= load_s5_write_en;
+      load_s6_base_addr    <= load_s5_base_addr;
+      load_s6_elem_low20   <= load_s5_elem_low_product[19:0];
+
+      load_s7_valid        <= load_s6_valid;
+      load_s7_to_acp       <= load_s6_to_acp;
+      load_s7_to_npu       <= load_s6_to_npu;
+      load_s7_write_en     <= load_s6_write_en;
+      load_s7_base_addr    <= load_s6_base_addr;
+      load_s7_word_total   <= load_s6_word_floor + 17'(load_s6_word_round);
+
+      if (load_s7_valid && load_s7_to_acp) begin
+        if (load_s7_word_total != 17'd0) begin
           acp_uop <= '{
-              write_en  : `PORT_MOD_E_WRITE,
-              base_addr : IN_LOAD_uop.dest_addr,
-              end_addr  : IN_LOAD_uop.dest_addr + 17'(fmap_word_total)
+              write_en  : load_s7_write_en,
+              base_addr : load_s7_base_addr,
+              end_addr  : load_s7_base_addr + load_s7_word_total
           };
           acp_rx_start <= 1'b1;
-          IN_acp_rdy   <= 1'b1;
+          IN_acp_rdy <= 1'b1;
         end
+      end
 
-        // L2 → host DDR4 (result DMA out)
-        from_L2_to_host: begin
-          acp_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
-          };
-          acp_rx_start <= 1'b1;
-          IN_acp_rdy   <= 1'b1;
-        end
-
-        // L2 → GEMM fmap broadcast
-        from_L2_to_L1_GEMM: begin
+      if (load_s7_valid && load_s7_to_npu) begin
+        if (load_s7_word_total != 17'd0) begin
           npu_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
+              write_en  : load_s7_write_en,
+              base_addr : load_s7_base_addr,
+              end_addr  : load_s7_base_addr + load_s7_word_total
           };
           npu_rx_start <= 1'b1;
-          IN_npu_rdy   <= 1'b1;
+          IN_npu_rdy <= 1'b1;
         end
-
-        // L2 → GEMV fmap broadcast
-        from_L2_to_L1_GEMV: begin
-          npu_uop <= '{
-              write_en  : `PORT_MOD_E_READ,
-              base_addr : IN_LOAD_uop.src_addr,
-              end_addr  : IN_LOAD_uop.src_addr + 17'(fmap_word_total)
-          };
-          npu_rx_start <= 1'b1;
-          IN_npu_rdy   <= 1'b1;
-        end
-
-        // L2 → CVO input (handled by mem_CVO_stream_bridge below)
-        from_L2_to_CVO: ;  // bridge watches IN_CVO_uop directly
-
-        default: ;
-      endcase
+      end
     end
   end
 
@@ -294,93 +544,200 @@ module mem_dispatcher #() (
       .IN_npu_is_busy       (npu_is_busy_wire)
   );
 
+  // ===| STORE writeback engine |================================================
+  // GEMM emits one 32-lane BF16 row through FROM_gemm_result_packer:
+  // 32 lanes * 16 bits / 128 bits = 4 L2 words. The packer holds valid/data
+  // until ready, so this small direct-port writer is enough for the current
+  // one-row result contract.
+  localparam int GemmStoreWords = (`ARRAY_SIZE_H * `BF16_WIDTH) / `AXI_STREAM_WIDTH;
+  localparam int StoreWordCntW = $clog2(GemmStoreWords + 1);
+
+  logic                     store_active;
+  logic [             16:0] store_base_addr;
+  logic [StoreWordCntW-1:0] store_word_count;
+  logic                     store_port_ready;
+  logic                     store_accept;
+  logic                     store_done_pending;
+  logic                     store_l2_valid;
+  logic                     store_l2_we;
+  logic [             16:0] store_l2_addr;
+  logic [            127:0] store_l2_wdata;
+
+  assign OUT_store_busy        = store_active;
+  assign store_port_ready      = store_active & ~cvo_bridge_busy;
+  assign OUT_gemm_result_ready = store_port_ready;
+  assign store_accept          = store_port_ready & IN_gemm_result_valid;
+
+  always_ff @(posedge clk_core) begin
+    if (!rst_n_core) begin
+      store_active       <= 1'b0;
+      store_base_addr    <= '0;
+      store_word_count   <= '0;
+      store_done_pending <= 1'b0;
+      store_l2_valid     <= 1'b0;
+      store_l2_we        <= 1'b0;
+      store_l2_addr      <= '0;
+      store_l2_wdata     <= '0;
+      OUT_store_done     <= 1'b0;
+    end else begin
+      store_l2_valid <= 1'b0;
+      store_l2_we    <= 1'b0;
+      OUT_store_done <= 1'b0;
+
+      if (store_done_pending) begin
+        OUT_store_done     <= 1'b1;
+        store_done_pending <= 1'b0;
+      end
+
+      if (IN_store_uop_valid) begin
+        store_word_count   <= '0;
+        store_base_addr    <= IN_STORE_uop.dest_addr;
+        store_active       <= (IN_STORE_uop.data_dest == from_GEMM_res_to_L2);
+        store_done_pending <= 1'b0;
+      end else if (store_accept) begin
+        store_l2_valid <= 1'b1;
+        store_l2_we    <= 1'b1;
+        store_l2_addr  <= store_base_addr + 17'(store_word_count);
+        store_l2_wdata <= IN_gemm_result_data;
+
+        if (store_word_count == StoreWordCntW'(GemmStoreWords - 1)) begin
+          store_word_count   <= '0;
+          store_active       <= 1'b0;
+          store_done_pending <= 1'b1;
+        end else begin
+          store_word_count <= store_word_count + StoreWordCntW'(1);
+        end
+      end
+    end
+  end
+
   // ===| L2 cache controller |===================================================
-  // CVO bridge drives L2 port B when active; otherwise port B is driven by
-  // the NPU DMA state machine in mem_GLOBAL_cache.
-  logic        cvo_l2_we;
-  logic [16:0] cvo_l2_addr;
+  // CVO bridge drives L2 port B when active. GEMM STORE writes use the same
+  // direct port when the bridge and NPU DMA state machine are idle; otherwise
+  // the NPU DMA state machine in mem_GLOBAL_cache owns port B.
+  logic         cvo_l2_valid;
+  logic         cvo_l2_we;
+  logic [ 16:0] cvo_l2_addr;
   logic [127:0] cvo_l2_wdata;
   logic [127:0] cvo_l2_rdata;
 
-  logic        npu_l2_we;
-  logic [16:0] npu_l2_addr;
   logic [127:0] npu_l2_wdata;
   logic [127:0] npu_l2_rdata;
+  logic         final_npu_direct_en;
+  logic         final_npu_direct_valid;
+  logic         final_npu_direct_we;
+  logic [ 16:0] final_npu_direct_addr;
+  logic [127:0] final_npu_direct_wdata;
 
-  // Port B arbitration: CVO bridge wins when busy
-  logic        final_npu_we;
-  logic [16:0] final_npu_addr;
-  logic [127:0] final_npu_wdata;
-
-  always_comb begin
-    if (cvo_bridge_busy) begin
-      final_npu_we    = cvo_l2_we;
-      final_npu_addr  = cvo_l2_addr;
-      final_npu_wdata = cvo_l2_wdata;
-    end else begin
-      final_npu_we    = npu_l2_we;
-      final_npu_addr  = npu_l2_addr;
-      final_npu_wdata = npu_l2_wdata;
-    end
-  end
+  assign npu_l2_wdata = '0;
 
   // Route L2 rdata to the appropriate consumer
   assign cvo_l2_rdata = npu_l2_rdata;  // shared read bus
 
+  always_comb begin
+    final_npu_direct_en    = 1'b0;
+    final_npu_direct_valid = 1'b0;
+    final_npu_direct_we    = 1'b0;
+    final_npu_direct_addr  = '0;
+    final_npu_direct_wdata = '0;
+
+    if (cvo_bridge_busy) begin
+      final_npu_direct_en    = 1'b1;
+      final_npu_direct_valid = cvo_l2_valid;
+      final_npu_direct_we    = cvo_l2_we;
+      final_npu_direct_addr  = cvo_l2_addr;
+      final_npu_direct_wdata = cvo_l2_wdata;
+    end else if (store_l2_valid) begin
+      final_npu_direct_en    = 1'b1;
+      final_npu_direct_valid = store_l2_valid;
+      final_npu_direct_we    = store_l2_we;
+      final_npu_direct_addr  = store_l2_addr;
+      final_npu_direct_wdata = store_l2_wdata;
+    end
+  end
+
   mem_GLOBAL_cache #() u_l2_cache (
-      .clk_core         (clk_core),
-      .rst_n_core       (rst_n_core),
-      .clk_axi          (clk_axi),
-      .rst_axi_n        (rst_axi_n),
+      .clk_core  (clk_core),
+      .rst_n_core(rst_n_core),
+      .clk_axi   (clk_axi),
+      .rst_axi_n (rst_axi_n),
 
       .S_AXIS_ACP_FMAP  (S_AXIS_ACP_FMAP),
       .M_AXIS_ACP_RESULT(M_AXIS_ACP_RESULT),
+      .M_AXIS_NPU_FMAP  (M_AXIS_L1_FMAP),
 
       // ACP control
-      .IN_acp_write_en  (OUT_acp_cmd.write_en),
-      .IN_acp_base_addr (OUT_acp_cmd.base_addr),
-      .IN_acp_end_addr  (OUT_acp_cmd.end_addr),
-      .IN_acp_rx_start  (OUT_acp_cmd_valid),
-      .OUT_acp_is_busy  (acp_is_busy_wire),
+      .IN_acp_write_en (OUT_acp_cmd.write_en),
+      .IN_acp_base_addr(OUT_acp_cmd.base_addr),
+      .IN_acp_end_addr (OUT_acp_cmd.end_addr),
+      .IN_acp_rx_start (OUT_acp_cmd_valid),
+      .OUT_acp_is_busy (acp_is_busy_wire),
 
       // NPU port B (CVO bridge or DMA state machine)
-      .IN_npu_write_en  (OUT_npu_cmd.write_en),
-      .IN_npu_base_addr (OUT_npu_cmd.base_addr),
-      .IN_npu_end_addr  (OUT_npu_cmd.end_addr),
-      .IN_npu_rx_start  (OUT_npu_cmd_valid),
-      .OUT_npu_is_busy  (npu_is_busy_wire),
+      .IN_npu_write_en (OUT_npu_cmd.write_en),
+      .IN_npu_base_addr(OUT_npu_cmd.base_addr),
+      .IN_npu_end_addr (OUT_npu_cmd.end_addr),
+      .IN_npu_rx_start (OUT_npu_cmd_valid),
+      .OUT_npu_is_busy (npu_is_busy_wire),
 
-      .IN_npu_wdata     (final_npu_wdata),
-      .OUT_npu_rdata    (npu_l2_rdata)
+      // Direct port-B owner for CVO L2 bursts or GEMM result STORE writes.
+      .IN_npu_direct_en   (final_npu_direct_en),
+      .IN_npu_direct_valid(final_npu_direct_valid),
+      .IN_npu_direct_we   (final_npu_direct_we),
+      .IN_npu_direct_addr (final_npu_direct_addr),
+      .IN_npu_direct_wdata(final_npu_direct_wdata),
+
+      .IN_npu_wdata (npu_l2_wdata),
+      .OUT_npu_rdata(npu_l2_rdata)
   );
+
+  assign OUT_debug_status = {
+    final_npu_direct_we,
+    final_npu_direct_valid,
+    npu_cmd_fifo_full,
+    acp_cmd_fifo_full,
+    OUT_npu_cmd_valid,
+    OUT_acp_cmd_valid,
+    npu_is_busy_wire,
+    acp_is_busy_wire,
+    cvo_bridge_busy,
+    store_l2_valid,
+    store_done_pending,
+    OUT_gemm_result_ready,
+    IN_gemm_result_valid,
+    store_accept,
+    IN_store_uop_valid,
+    store_active
+  };
 
   // ===| CVO Stream Bridge |=====================================================
   logic cvo_bridge_done;
 
   mem_CVO_stream_bridge u_cvo_bridge (
-      .clk                (clk_core),
-      .rst_n              (rst_n_core),
+      .clk  (clk_core),
+      .rst_n(rst_n_core),
 
-      .IN_cvo_uop         (IN_CVO_uop),
-      .IN_cvo_uop_valid   (IN_cvo_uop_valid),
-      .OUT_busy           (cvo_bridge_busy),
-      .OUT_done           (cvo_bridge_done),
+      .IN_cvo_uop      (IN_CVO_uop),
+      .IN_cvo_uop_valid(IN_cvo_uop_valid),
+      .OUT_busy        (cvo_bridge_busy),
+      .OUT_done        (cvo_bridge_done),
 
       // L2 port B direct access
-      .OUT_l2_we          (cvo_l2_we),
-      .OUT_l2_addr        (cvo_l2_addr),
-      .OUT_l2_wdata       (cvo_l2_wdata),
-      .IN_l2_rdata        (cvo_l2_rdata),
+      .OUT_l2_valid(cvo_l2_valid),
+      .OUT_l2_we   (cvo_l2_we),
+      .OUT_l2_addr (cvo_l2_addr),
+      .OUT_l2_wdata(cvo_l2_wdata),
+      .IN_l2_rdata (cvo_l2_rdata),
 
       // CVO data stream
-      .OUT_cvo_data       (OUT_cvo_data),
-      .OUT_cvo_valid      (OUT_cvo_valid),
-      .IN_cvo_data_ready  (IN_cvo_data_ready),
+      .OUT_cvo_data     (OUT_cvo_data),
+      .OUT_cvo_valid    (OUT_cvo_valid),
+      .IN_cvo_data_ready(IN_cvo_data_ready),
 
       // CVO result stream
-      .IN_cvo_result        (IN_cvo_result),
-      .IN_cvo_result_valid  (IN_cvo_result_valid),
-      .OUT_cvo_result_ready (OUT_cvo_result_ready)
+      .IN_cvo_result       (IN_cvo_result),
+      .IN_cvo_result_valid (IN_cvo_result_valid),
+      .OUT_cvo_result_ready(OUT_cvo_result_ready)
   );
 
 endmodule
