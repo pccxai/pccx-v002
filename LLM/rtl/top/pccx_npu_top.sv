@@ -12,13 +12,14 @@ import isa_pkg::*;
 import vec_core_pkg::*;
 import bf16_math_pkg::*;
 
-// ===| Module: pccx_npu_top — pccx v002 IP-core integration wrapper |===========
-// Purpose      : Top-level integration of reusable v002 NPU subsystems.
-// Spec ref     : pccx v002 architecture overview and top interface contract.
+// ===| Module: pccx_npu_top — pccx v002 SoC integration wrapper |===============
+// Purpose      : Top-level integration of all v002 NPU subsystems on KV260.
+// Spec ref     : pccx v002 §1 (architecture overview), §6 (KV260 target).
+// Target       : Xilinx Kria KV260 (xck26-sfvc784-2LV-c), ZU5EV.
 // Clock        : clk_core @ 400 MHz (compute), clk_axi @ 250 MHz (HP/AXIL).
 // Reset        : rst_n_core / rst_axi_n active-low. Synchronous release.
 // Soft-clear   : i_clear (active-high, sync) — combined with reset wherever
-//                state is latched. Follows the package reset convention.
+//                state is latched per the local reset convention.
 // Throughput   : Steady-state, dual-lane W4A8 systolic = 32 × 32 × 2 MAC/clk.
 // Backpressure : HP weight FIFOs (mem_HP_buffer) provide CDC + skid; ACP fmap
 //                FIFO (preprocess_fmap) holds at boundary when broadcast stalls.
@@ -37,8 +38,8 @@ import bf16_math_pkg::*;
 //   OP_CVO   : L2 → CVO_top → L2 (mem_dispatcher ↔ CVO stream bridge)
 //
 // Status word (mmio_npu_stat[31:0], surfaced to AXIL_STAT_OUT):
-//   bit 0 : BUSY  = fifo_full | cvo_busy | cvo_disp_busy
-//   bit 1 : DONE  = CVO operation complete pulse (one cycle)
+//   bit 0 : BUSY  = fifo_full | cvo_busy | cvo_disp_busy | store_busy
+//   bit 1 : DONE  = CVO operation or STORE writeback complete pulse
 //   bit 31:2 reserved.
 // ===============================================================================
 
@@ -74,6 +75,7 @@ module pccx_npu_top (
   axis_if #(.DATA_WIDTH(128)) M_CORE_HP1_WEIGHT ();
   axis_if #(.DATA_WIDTH(128)) M_CORE_HP2_WEIGHT ();
   axis_if #(.DATA_WIDTH(128)) M_CORE_HP3_WEIGHT ();
+  axis_if #(.DATA_WIDTH(128)) M_CORE_FMAP_FROM_L2 ();
 
   // ===| Internal Wires — Instruction Path |=====================================
   logic                GEMV_op_x64_valid_wire;
@@ -86,6 +88,9 @@ module pccx_npu_top (
 
   logic                fifo_full_wire;
 
+  // ===| Status backflow signals (defined later as mmio_npu_stat) |=============
+  logic [31:0] mmio_npu_stat;
+
   // ===| [1] NPU Controller |====================================================
   npu_controller_top #() u_npu_controller_top (
       .clk    (clk_core),
@@ -93,6 +98,12 @@ module pccx_npu_top (
       .i_clear(i_clear),
 
       .S_AXIL_CTRL(S_AXIL_CTRL),
+
+      // Continuous status push so the host AXIL_STAT_OUT FIFO stays non-empty
+      // (AXIL_STAT_OUT asserts s_arready only when the FIFO holds data). The
+      // FIFO is 8 deep and self-throttles on overflow.
+      .IN_enc_stat ({32'b0, mmio_npu_stat}),
+      .IN_enc_valid(1'b1),
 
       .OUT_GEMV_op_x64_valid  (GEMV_op_x64_valid_wire),
       .OUT_GEMM_op_x64_valid  (GEMM_op_x64_valid_wire),
@@ -107,8 +118,11 @@ module pccx_npu_top (
   gemm_control_uop_t   GEMM_uop_wire;
   GEMV_control_uop_t   GEMV_uop_wire;
   memory_control_uop_t LOAD_uop_wire;
+  logic                LOAD_uop_valid_wire;
   memory_control_uop_t STORE_uop_wire;  // latched at issue; drives result writeback
+  logic                STORE_uop_valid_wire;
   memory_set_uop_t     mem_set_uop;
+  logic                mem_set_uop_valid_wire;
   cvo_control_uop_t    CVO_uop_wire;
   logic                sram_rd_start_wire;  // one-cycle pulse: start fmap broadcast
 
@@ -127,8 +141,11 @@ module pccx_npu_top (
       .OUT_GEMM_uop     (GEMM_uop_wire),
       .OUT_GEMV_uop     (GEMV_uop_wire),
       .OUT_LOAD_uop     (LOAD_uop_wire),
+      .OUT_LOAD_uop_valid(LOAD_uop_valid_wire),
       .OUT_STORE_uop    (STORE_uop_wire),
+      .OUT_STORE_uop_valid(STORE_uop_valid_wire),
       .OUT_mem_set_uop  (mem_set_uop),
+      .OUT_mem_set_uop_valid(mem_set_uop_valid_wire),
       .OUT_CVO_uop      (CVO_uop_wire),
       .OUT_sram_rd_start(sram_rd_start_wire)
   );
@@ -142,6 +159,13 @@ module pccx_npu_top (
   logic        cvo_result_valid_wire;
   logic        cvo_result_ready_wire;
   logic        cvo_disp_busy_wire;
+  logic        store_busy_wire;
+  logic        store_done_wire;
+  logic        memset_done_wire;
+  logic [15:0] mem_debug_status_wire;
+  logic [`AXI_STREAM_WIDTH-1:0] packed_res_data;
+  logic                         packed_res_valid;
+  logic                         packed_res_ready;
 
   mem_dispatcher #() u_mem_dispatcher (
       .clk_core  (clk_core),
@@ -152,10 +176,15 @@ module pccx_npu_top (
 
       .S_AXIS_ACP_FMAP  (S_AXIS_ACP_FMAP),
       .M_AXIS_ACP_RESULT(M_AXIS_ACP_RESULT),
+      .M_AXIS_L1_FMAP   (M_CORE_FMAP_FROM_L2),
 
-      .IN_LOAD_uop     (LOAD_uop_wire),
-      .IN_mem_set_uop  (mem_set_uop),
-      .IN_CVO_uop      (CVO_uop_wire),
+      .IN_LOAD_uop       (LOAD_uop_wire),
+      .IN_LOAD_uop_valid (LOAD_uop_valid_wire),
+      .IN_STORE_uop      (STORE_uop_wire),
+      .IN_store_uop_valid(STORE_uop_valid_wire),
+      .IN_mem_set_uop    (mem_set_uop),
+      .IN_mem_set_uop_valid(mem_set_uop_valid_wire),
+      .IN_CVO_uop        (CVO_uop_wire),
       .IN_cvo_uop_valid(cvo_op_x64_valid_wire),
 
       .OUT_cvo_data     (cvo_disp_data_wire),
@@ -166,8 +195,16 @@ module pccx_npu_top (
       .IN_cvo_result_valid (cvo_result_valid_wire),
       .OUT_cvo_result_ready(cvo_result_ready_wire),
 
-      .OUT_fifo_full(fifo_full_wire),
-      .OUT_cvo_busy (cvo_disp_busy_wire)
+      .IN_gemm_result_data (packed_res_data),
+      .IN_gemm_result_valid(packed_res_valid),
+      .OUT_gemm_result_ready(packed_res_ready),
+
+      .OUT_fifo_full (fifo_full_wire),
+      .OUT_cvo_busy  (cvo_disp_busy_wire),
+      .OUT_store_busy(store_busy_wire),
+      .OUT_store_done(store_done_wire),
+      .OUT_memset_done(memset_done_wire),
+      .OUT_debug_status(mem_debug_status_wire)
   );
 
   // ===| [4] HP Weight Buffer (CDC FIFO: AXI → Core clock) |====================
@@ -198,7 +235,7 @@ module pccx_npu_top (
       .rst_n  (rst_n_core),
       .i_clear(i_clear),
 
-      .S_AXIS_ACP_FMAP(S_AXIS_ACP_FMAP),
+      .S_AXIS_ACP_FMAP(M_CORE_FMAP_FROM_L2),
 
       .i_rd_start(sram_rd_start_wire),
 
@@ -277,9 +314,6 @@ module pccx_npu_top (
   endgenerate
 
   // ===| [8] Result Packer |=====================================================
-  logic [`AXI_STREAM_WIDTH-1:0] packed_res_data;
-  logic                         packed_res_valid;
-
   FROM_gemm_result_packer #() u_packer (
       .clk          (clk_core),
       .rst_n        (rst_n_core),
@@ -287,7 +321,7 @@ module pccx_npu_top (
       .row_res_valid(norm_res_seq_valid),
       .packed_data  (packed_res_data),
       .packed_valid (packed_res_valid),
-      .packed_ready (1'b1),                // downstream accepts unconditionally for now
+      .packed_ready (packed_res_ready),
       .o_busy       ()
   );
 
@@ -394,12 +428,57 @@ module pccx_npu_top (
   );
 
   // ===| Status |================================================================
-  // Aggregated NPU busy/done flags — intended for ctrl_npu_frontend IN_enc_stat.
-  // Bit 0 : BUSY  (memory FIFO full | CVO engine active | CVO DMA bridge active)
-  // Bit 1 : DONE  (CVO operation complete pulse)
-  logic [31:0] mmio_npu_stat;
-  assign mmio_npu_stat[0]    = fifo_full_wire | cvo_busy_wire | cvo_disp_busy_wire;
-  assign mmio_npu_stat[1]    = cvo_done_wire;
-  assign mmio_npu_stat[31:2] = 30'd0;
+  // Aggregated NPU busy/done flags routed to ctrl_npu_frontend IN_enc_stat via
+  // the npu_controller_top instance above. DONE is sticky so host polling cannot
+  // miss a one-cycle completion pulse from MEMSET, CVO, or STORE writeback.
+  logic op_busy_sticky;
+  logic op_done_sticky;
+  logic op_start_pulse;
+  logic op_done_pulse;
+  logic [13:0] top_debug_status;
+
+  assign op_start_pulse = GEMV_op_x64_valid_wire | GEMM_op_x64_valid_wire |
+                          memcpy_op_x64_valid_wire | memset_op_x64_valid_wire |
+                          cvo_op_x64_valid_wire;
+  assign op_done_pulse  = memset_done_wire | cvo_done_wire | store_done_wire;
+
+  always_ff @(posedge clk_core) begin
+    if (!rst_n_core || i_clear) begin
+      op_busy_sticky <= 1'b0;
+      op_done_sticky <= 1'b0;
+    end else begin
+      if (op_start_pulse) begin
+        op_busy_sticky <= 1'b1;
+        op_done_sticky <= 1'b0;
+      end
+
+      if (op_done_pulse) begin
+        op_busy_sticky <= 1'b0;
+        op_done_sticky <= 1'b1;
+      end
+    end
+  end
+
+  assign mmio_npu_stat[0]    = op_busy_sticky | fifo_full_wire | cvo_busy_wire |
+                               cvo_disp_busy_wire | store_busy_wire;
+  assign mmio_npu_stat[1]    = op_done_sticky;
+  assign top_debug_status = {
+    M_AXIS_ACP_RESULT.tready,
+    M_AXIS_ACP_RESULT.tvalid,
+    M_CORE_HP1_WEIGHT.tvalid,
+    M_CORE_HP0_WEIGHT.tvalid,
+    fmap_broadcast_valid,
+    packed_res_ready,
+    packed_res_valid,
+    store_done_wire,
+    store_busy_wire,
+    cvo_disp_busy_wire,
+    cvo_busy_wire,
+    cvo_op_x64_valid_wire,
+    memset_op_x64_valid_wire,
+    memcpy_op_x64_valid_wire
+  };
+  assign mmio_npu_stat[15:2]  = top_debug_status;
+  assign mmio_npu_stat[31:16] = mem_debug_status_wire;
 
 endmodule

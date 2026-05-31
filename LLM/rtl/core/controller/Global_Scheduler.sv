@@ -34,7 +34,8 @@ import isa_pkg::*;
 //                OUT_sram_rd_start is one-cycle pulse only.
 // ===============================================================================
 
-module Global_Scheduler #() (
+module Global_Scheduler #(
+) (
     input logic clk_core,
     input logic rst_n_core,
 
@@ -51,12 +52,15 @@ module Global_Scheduler #() (
     output gemm_control_uop_t   OUT_GEMM_uop,
     output GEMV_control_uop_t   OUT_GEMV_uop,
     output memory_control_uop_t OUT_LOAD_uop,
+    output logic                OUT_LOAD_uop_valid,
     output memory_control_uop_t OUT_STORE_uop,
+    output logic                OUT_STORE_uop_valid,
     output memory_set_uop_t     OUT_mem_set_uop,
+    output logic                OUT_mem_set_uop_valid,
     output cvo_control_uop_t    OUT_CVO_uop,
 
     // ===| Datapath control |====================================================
-    output logic OUT_sram_rd_start   // pulse: start fmap cache broadcast
+    output logic OUT_sram_rd_start  // pulse: start fmap cache broadcast
 );
 
   // ===| Combinational instruction body casts |==================================
@@ -77,15 +81,22 @@ module Global_Scheduler #() (
   // ===| MEMSET uop |============================================================
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
-      OUT_mem_set_uop <= '0;
-    end else if (IN_memset_op_x64_valid) begin
-      OUT_mem_set_uop <= '{
-          dest_cache : dest_cache_e'(memset_op_x64.dest_cache),
-          dest_addr  : memset_op_x64.dest_addr,
-          a_value    : memset_op_x64.a_value,
-          b_value    : memset_op_x64.b_value,
-          c_value    : memset_op_x64.c_value
-      };
+      OUT_mem_set_uop       <= '0;
+      OUT_mem_set_uop_valid <= 1'b0;
+    end else begin
+      OUT_mem_set_uop_valid <= 1'b0;
+
+      if (IN_memset_op_x64_valid) begin
+        OUT_mem_set_uop <= '{
+            dest_cache : dest_cache_e'(memset_op_x64.dest_cache),
+            dest_addr  : memset_op_x64.dest_addr,
+            a_value    : memset_op_x64.a_value,
+            b_value    : memset_op_x64.b_value,
+            c_value    : memset_op_x64.c_value
+        };
+
+        OUT_mem_set_uop_valid <= 1'b1;
+      end
     end
   end
 
@@ -95,17 +106,24 @@ module Global_Scheduler #() (
   always_comb begin
     if (memcpy_op_x64.from_device == FROM_HOST && memcpy_op_x64.to_device == TO_NPU)
       memcpy_route = from_host_to_L2;
-    else
-      memcpy_route = from_L2_to_host;
+    else memcpy_route = from_L2_to_host;
   end
 
   // ===| LOAD uop — single driver (priority: GEMM > GEMV > MEMCPY > CVO) |======
+  // OUT_LOAD_uop_valid is a 1-cycle pulse asserted in lockstep with the
+  // OUT_LOAD_uop register update. Downstream (mem_dispatcher) must gate its
+  // dest-routing decode on this pulse — without it, non-LOAD opcodes
+  // (RESET_KV_CACHE / NEXT_TOKEN / etc.) propagate the stale LOAD_uop value
+  // every cycle, causing the memory dispatcher to push garbage uops into
+  // the NPU FIFO and hang `npu_is_busy` permanently.
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
-      OUT_LOAD_uop      <= '0;
-      OUT_sram_rd_start <= 1'b0;
+      OUT_LOAD_uop       <= '0;
+      OUT_LOAD_uop_valid <= 1'b0;
+      OUT_sram_rd_start  <= 1'b0;
     end else begin
-      OUT_sram_rd_start <= 1'b0;   // default: no pulse
+      OUT_LOAD_uop_valid <= 1'b0;  // default: no pulse
+      OUT_sram_rd_start  <= 1'b0;  // default: no pulse
 
       if (IN_GEMM_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -115,6 +133,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : GEMM_op_x64.shape_ptr_addr,
             async          : SYNC_OP
         };
+        OUT_LOAD_uop_valid <= 1'b1;
         OUT_sram_rd_start <= 1'b1;
 
       end else if (IN_GEMV_op_x64_valid) begin
@@ -125,6 +144,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : GEMV_op_x64.shape_ptr_addr,
             async          : SYNC_OP
         };
+        OUT_LOAD_uop_valid <= 1'b1;
         OUT_sram_rd_start <= 1'b1;
 
       end else if (IN_memcpy_op_x64_valid) begin
@@ -135,6 +155,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : memcpy_op_x64.shape_ptr_addr,
             async          : memcpy_op_x64.async
         };
+        OUT_LOAD_uop_valid <= 1'b1;
 
       end else if (IN_cvo_op_x64_valid) begin
         OUT_LOAD_uop <= '{
@@ -144,6 +165,7 @@ module Global_Scheduler #() (
             shape_ptr_addr : '0,
             async          : cvo_op_x64.async
         };
+        OUT_LOAD_uop_valid <= 1'b1;
       end
     end
   end
@@ -152,31 +174,39 @@ module Global_Scheduler #() (
   // Held until the engine signals completion (external handshake, not shown here).
   always_ff @(posedge clk_core) begin
     if (!rst_n_core) begin
-      OUT_STORE_uop <= '0;
-    end else if (IN_GEMM_op_x64_valid) begin
-      OUT_STORE_uop <= '{
-          data_dest      : from_GEMM_res_to_L2,
-          dest_addr      : GEMM_op_x64.dest_reg,
-          src_addr       : '0,
-          shape_ptr_addr : GEMM_op_x64.shape_ptr_addr,
-          async          : SYNC_OP
-      };
-    end else if (IN_GEMV_op_x64_valid) begin
-      OUT_STORE_uop <= '{
-          data_dest      : from_GEMV_res_to_L2,
-          dest_addr      : GEMV_op_x64.dest_reg,
-          src_addr       : '0,
-          shape_ptr_addr : GEMV_op_x64.shape_ptr_addr,
-          async          : SYNC_OP
-      };
-    end else if (IN_cvo_op_x64_valid) begin
-      OUT_STORE_uop <= '{
-          data_dest      : from_CVO_res_to_L2,
-          dest_addr      : cvo_op_x64.dst_addr,
-          src_addr       : '0,
-          shape_ptr_addr : '0,
-          async          : cvo_op_x64.async
-      };
+      OUT_STORE_uop       <= '0;
+      OUT_STORE_uop_valid <= 1'b0;
+    end else begin
+      OUT_STORE_uop_valid <= 1'b0;
+
+      if (IN_GEMM_op_x64_valid) begin
+        OUT_STORE_uop <= '{
+            data_dest      : from_GEMM_res_to_L2,
+            dest_addr      : GEMM_op_x64.dest_reg,
+            src_addr       : '0,
+            shape_ptr_addr : GEMM_op_x64.shape_ptr_addr,
+            async          : SYNC_OP
+        };
+        OUT_STORE_uop_valid <= 1'b1;
+      end else if (IN_GEMV_op_x64_valid) begin
+        OUT_STORE_uop <= '{
+            data_dest      : from_GEMV_res_to_L2,
+            dest_addr      : GEMV_op_x64.dest_reg,
+            src_addr       : '0,
+            shape_ptr_addr : GEMV_op_x64.shape_ptr_addr,
+            async          : SYNC_OP
+        };
+        OUT_STORE_uop_valid <= 1'b1;
+      end else if (IN_cvo_op_x64_valid) begin
+        OUT_STORE_uop <= '{
+            data_dest      : from_CVO_res_to_L2,
+            dest_addr      : cvo_op_x64.dst_addr,
+            src_addr       : '0,
+            shape_ptr_addr : '0,
+            async          : cvo_op_x64.async
+        };
+        OUT_STORE_uop_valid <= 1'b1;
+      end
     end
   end
 

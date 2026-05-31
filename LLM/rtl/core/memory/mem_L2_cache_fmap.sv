@@ -15,7 +15,10 @@
 // Ports        :
 //   Port A — ACP DMA path (host DDR4 ↔ L2 via ACP)
 //   Port B — NPU compute  (GEMM / GEMV / CVO streaming R/W)
-// Latency      : READ_LATENCY = 3 cycles (URAM registered output, 400 MHz).
+// Latency      : Port A READ_LATENCY = 7 cycles. Port B presents 7 external
+//                cycles by using XPM READ_LATENCY_B = 6 plus one local output
+//                register, keeping downstream valid alignment unchanged while
+//                moving the final dout stage out of the generated XPM SRL chain.
 // Throughput   : 1 read + 1 write per port per cycle (true dual-port).
 // Write policy : WRITE_MODE = no_change on both ports (URAM TDP requirement);
 //                read-then-write on the SAME address in the SAME cycle is
@@ -35,17 +38,29 @@ module mem_L2_cache_fmap #(
     input  logic        rst_n_core,
 
     // ===| Port A — ACP host DMA |================================================
+    input  logic         IN_acp_en,
     input  logic         IN_acp_we,
     input  logic  [16:0] IN_acp_addr,
     input  logic [127:0] IN_acp_wdata,
     output logic [127:0] OUT_acp_rdata,
 
     // ===| Port B — NPU compute engines |=========================================
+    input  logic         IN_npu_en,
     input  logic         IN_npu_we,
     input  logic  [16:0] IN_npu_addr,
     input  logic [127:0] IN_npu_wdata,
     output logic [127:0] OUT_npu_rdata
 );
+
+  logic [127:0] npu_rdata_xpm;
+
+  always_ff @(posedge clk_core) begin
+    if (!rst_n_core) begin
+      OUT_npu_rdata <= '0;
+    end else begin
+      OUT_npu_rdata <= npu_rdata_xpm;
+    end
+  end
 
   xpm_memory_tdpram #(
       // ===| Geometry |===
@@ -62,8 +77,9 @@ module mem_L2_cache_fmap #(
       // ===| Implementation |===
       .MEMORY_PRIMITIVE   ("ultra"),      // Force URAM on UltraScale+
       .CLOCKING_MODE      ("common_clock"),
-      .READ_LATENCY_A     (3),
-      .READ_LATENCY_B     (3),
+      .CASCADE_HEIGHT     (2),            // Shorten URAM cascade timing depth at 400 MHz
+      .READ_LATENCY_A     (7),
+      .READ_LATENCY_B     (6),
       // URAM true-dual-port requires no-change mode on both ports.
       .WRITE_MODE_A       ("no_change"),
       .WRITE_MODE_B       ("no_change"),
@@ -80,7 +96,7 @@ module mem_L2_cache_fmap #(
       // Port A
       .clka           (clk_core),
       .rsta           (~rst_n_core),
-      .ena            (1'b1),
+      .ena            (IN_acp_en | IN_acp_we),
       .wea            (IN_acp_we),
       .addra          (IN_acp_addr),
       .dina           (IN_acp_wdata),
@@ -94,11 +110,11 @@ module mem_L2_cache_fmap #(
       // Port B
       .clkb           (clk_core),
       .rstb           (~rst_n_core),
-      .enb            (1'b1),
+      .enb            (IN_npu_en | IN_npu_we),
       .web            (IN_npu_we),
       .addrb          (IN_npu_addr),
       .dinb           (IN_npu_wdata),
-      .doutb          (OUT_npu_rdata),
+      .doutb          (npu_rdata_xpm),
       .regceb         (1'b1),
       .injectsbiterrb (1'b0),
       .injectdbiterrb (1'b0),
