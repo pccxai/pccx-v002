@@ -49,7 +49,7 @@ module GEMM_weight_dispatcher #(
   // ===| Registered outputs to the systolic array |=============================
   output logic [weight_size-1:0] weight_upper [0:weight_cnt-1],
   output logic [weight_size-1:0] weight_lower [0:weight_cnt-1],
-  output logic                   weight_valid
+  (* max_fanout = 32 *) output logic weight_valid
 );
 
   // ===| Flow control — always accept while the pipeline is not stalled |=======

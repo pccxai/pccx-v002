@@ -107,7 +107,9 @@ module GEMV_reduction
 
           // --- Register Control (0 = Comb, 1 = Registered) ---
           .AREG(0),
+          .ACASCREG(0),
           .BREG(0),
+          .BCASCREG(0),
           .CREG(0),
           .PREG(1)   // Enable P register (1 clock delay for sum)
       ) u_dsp (

@@ -88,7 +88,7 @@ module FROM_gemm_result_packer #(
       end
 
       // Clear valid bits once they are consumed (handled by FSM below)
-      if (state == SEND_DATA && packed_ready) begin
+      if (state == SEND_DATA && packed_valid && packed_ready) begin
         for (int i = 0; i < BeatsPerWord; i++) begin
           capture_valid[send_idx+i] <= 1'b0;
         end
@@ -121,7 +121,7 @@ module FROM_gemm_result_packer #(
         end
 
         SEND_DATA: begin
-          if (packed_ready) begin
+          if (!packed_valid) begin
             // Lane b of the BeatsPerWord-wide group lands in the
             // [b*BF16_WIDTH +: BF16_WIDTH] slice — same byte order as
             // the original 8-lane concat, but tracks BeatsPerWord so
@@ -130,7 +130,8 @@ module FROM_gemm_result_packer #(
               packed_data[b*`BF16_WIDTH +: `BF16_WIDTH] <= capture_reg[send_idx+b];
             end
             packed_valid <= 1'b1;
-
+          end else if (packed_ready) begin
+            packed_valid <= 1'b0;
             if (send_idx >= LastSendIdx) begin
               state    <= IDLE;
               send_idx <= 0;
@@ -138,8 +139,6 @@ module FROM_gemm_result_packer #(
               send_idx <= send_idx + BeatsPerWord;
               state    <= CHECK_VALID;
             end
-          end else begin
-            packed_valid <= 1'b1;  // Keep high until ready
           end
         end
 

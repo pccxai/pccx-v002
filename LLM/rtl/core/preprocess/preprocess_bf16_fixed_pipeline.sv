@@ -33,25 +33,31 @@ module preprocess_bf16_fixed_pipeline (
 );
 
   // ===| Stage 1: Input Buffering & Local Max Exponent |===
-  // We need to buffer the first 16 words while waiting for the next 16.
-  logic [255:0] buffer_low;
-  logic [  7:0] local_max_low;
-  logic         first_half_valid;
+  localparam logic [2:0] PHASE_LOW = 3'd0;
+  localparam logic [2:0] PHASE_HIGH = 3'd1;
+  localparam logic [2:0] PHASE_REDUCE_HIGH = 3'd2;
+  localparam logic [2:0] PHASE_REDUCE_PAIR = 3'd3;
+  localparam logic [2:0] PHASE_REDUCE_FINAL = 3'd4;
 
-  logic         phase;  // 0: Expecting Low 16, 1: Expecting High 16
+  logic [2:0] phase;
+  logic [7:0] low_max_part [0:3];
+  logic [7:0] high_max_part[0:3];
+  logic [7:0] reduce_max_part[0:3];
 
-  // Combinational Logic to find the maximum exponent among 16 BF16 elements
-  function automatic logic [7:0] find_max_e_16(input logic [255:0] data);
-    logic [7:0] max_val = 8'd0;
-    for (int i = 0; i < 16; i++) begin
-      if (data[(i*16)+7+:8] > max_val) begin
-        max_val = data[(i*16)+7+:8];
-      end
-    end
-    return max_val;
+  function automatic logic [7:0] max_e2(input logic [7:0] a, input logic [7:0] b);
+    return (a > b) ? a : b;
   endfunction
 
-  assign s_axis_tready = 1'b1;  // Always ready to sink data in this pipeline design
+  function automatic logic [7:0] find_max_e_4(input logic [63:0] data);
+    logic [7:0] max_01, max_23;
+
+    max_01 = max_e2(data[(0*16)+7+:8], data[(1*16)+7+:8]);
+    max_23 = max_e2(data[(2*16)+7+:8], data[(3*16)+7+:8]);
+
+    return max_e2(max_01, max_23);
+  endfunction
+
+  assign s_axis_tready = (phase == PHASE_LOW) || (phase == PHASE_HIGH);
 
   // Buffer registers for 32 elements
   logic [255:0] block_data_low;
@@ -61,33 +67,56 @@ module preprocess_bf16_fixed_pipeline (
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
-      phase <= 1'b0;
-      first_half_valid <= 1'b0;
-      block_valid <= 1'b0;
-    end else if (s_axis_tvalid) begin
-      if (phase == 1'b0) begin
-        // Store first 16 words and their max exponent
-        buffer_low       <= s_axis_tdata;
-        local_max_low    <= find_max_e_16(s_axis_tdata);
-        first_half_valid <= 1'b1;
-        block_valid      <= 1'b0;
-        phase            <= 1'b1;
-      end else begin : second_half
-        automatic logic [7:0] local_max_high;
-        // Second 16 words arrived! Combine to form 32-word block.
-        block_data_low   <= buffer_low;
-        block_data_high  <= s_axis_tdata;
-
-        // Compare max of low 16 and high 16 to get GLOBAL e_max.
-        local_max_high   = find_max_e_16(s_axis_tdata);
-        global_emax      <= (local_max_low > local_max_high) ? local_max_low
-                                                             : local_max_high;
-
-        block_valid      <= 1'b1;
-        phase            <= 1'b0;  // Reset for next block
+      phase           <= PHASE_LOW;
+      block_data_low  <= '0;
+      block_data_high <= '0;
+      global_emax     <= '0;
+      block_valid     <= 1'b0;
+      for (int j = 0; j < 4; j++) begin
+        low_max_part[j]  <= '0;
+        high_max_part[j] <= '0;
+        reduce_max_part[j] <= '0;
       end
     end else begin
       block_valid <= 1'b0;
+      case (phase)
+        PHASE_LOW: begin
+          if (s_axis_tvalid) begin
+            block_data_low  <= s_axis_tdata;
+            phase           <= PHASE_HIGH;
+          end
+        end
+        PHASE_HIGH: begin
+          low_max_part[0] <= find_max_e_4(block_data_low[63:0]);
+          low_max_part[1] <= find_max_e_4(block_data_low[127:64]);
+          low_max_part[2] <= find_max_e_4(block_data_low[191:128]);
+          low_max_part[3] <= find_max_e_4(block_data_low[255:192]);
+          if (s_axis_tvalid) begin
+            block_data_high  <= s_axis_tdata;
+            phase            <= PHASE_REDUCE_HIGH;
+          end
+        end
+        PHASE_REDUCE_HIGH: begin
+          high_max_part[0] <= find_max_e_4(block_data_high[63:0]);
+          high_max_part[1] <= find_max_e_4(block_data_high[127:64]);
+          high_max_part[2] <= find_max_e_4(block_data_high[191:128]);
+          high_max_part[3] <= find_max_e_4(block_data_high[255:192]);
+          phase <= PHASE_REDUCE_PAIR;
+        end
+        PHASE_REDUCE_PAIR: begin
+          reduce_max_part[0] <= max_e2(low_max_part[0], low_max_part[1]);
+          reduce_max_part[1] <= max_e2(low_max_part[2], low_max_part[3]);
+          reduce_max_part[2] <= max_e2(high_max_part[0], high_max_part[1]);
+          reduce_max_part[3] <= max_e2(high_max_part[2], high_max_part[3]);
+          phase <= PHASE_REDUCE_FINAL;
+        end
+        default: begin
+          global_emax <= max_e2(max_e2(reduce_max_part[0], reduce_max_part[1]),
+                                max_e2(reduce_max_part[2], reduce_max_part[3]));
+          block_valid <= 1'b1;
+          phase <= PHASE_LOW;
+        end
+      endcase
     end
   end
 
@@ -98,25 +127,31 @@ module preprocess_bf16_fixed_pipeline (
 
   logic         shift_phase;  // 0: shifting low, 1: shifting high
   logic [255:0] shift_target_data;
-  logic [  7:0] shift_target_emax;
+  (* keep = "true", dont_touch = "true" *)
+  logic [  7:0] shift_target_emax_lane[0:15];
   logic         shift_trigger;
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       shift_phase   <= 1'b0;
       shift_trigger <= 1'b0;
+      for (int j = 0; j < 16; j++) begin
+        shift_target_emax_lane[j] <= '0;
+      end
     end else begin
       if (block_valid) begin
         // Start shifting process
         shift_phase <= 1'b0;
         shift_target_data <= block_data_low;
-        shift_target_emax <= global_emax;
+        // Keep the 400 MHz shifter fanout local to each lane.
+        for (int j = 0; j < 16; j++) begin
+          shift_target_emax_lane[j] <= global_emax;
+        end
         shift_trigger <= 1'b1;
       end else if (shift_trigger && shift_phase == 1'b0) begin
         // Next cycle, shift the high part
         shift_phase <= 1'b1;
         shift_target_data <= block_data_high;
-        // keep shift_target_emax same
         shift_trigger <= 1'b1;
       end else begin
         shift_trigger <= 1'b0;
@@ -126,35 +161,50 @@ module preprocess_bf16_fixed_pipeline (
 
   // The 16 Parallel Shifters (With Sign & 2's Complement Handling)
   logic [431:0] shifted_mantissas;  // 16 * 27-bit
+  logic         shift_compute_valid;
+  logic         shift_sign_lane[0:15];
+  logic [ 7:0] shift_delta_e_lane[0:15];
+  logic [26:0] shift_base_mant_lane[0:15];
+
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      shift_compute_valid <= 1'b0;
+      for (int j = 0; j < 16; j++) begin
+        shift_sign_lane[j]      <= 1'b0;
+        shift_delta_e_lane[j]   <= '0;
+        shift_base_mant_lane[j] <= '0;
+      end
+    end else begin
+      shift_compute_valid <= shift_trigger;
+      if (shift_trigger) begin
+        for (int j = 0; j < 16; j++) begin
+          shift_sign_lane[j] <= shift_target_data[(j*16)+15];
+          shift_delta_e_lane[j] <= shift_target_emax_lane[j] - shift_target_data[(j*16)+7+:8];
+          shift_base_mant_lane[j] <= (shift_target_data[(j*16)+7+:8] == 8'd0)
+            ? {7'b0, 8'h0, shift_target_data[(j*16)+:7], 12'b0}
+            : {7'b0, 8'h1, shift_target_data[(j*16)+:7], 12'b0};
+        end
+      end
+    end
+  end
 
   genvar i;
   generate
     for (i = 0; i < 16; i++) begin : gen_shifters
-      logic [15:0] word;
-      logic        sign;
-      logic [ 7:0] e_val;
-      logic [ 6:0] m_val;
-      logic [26:0] base_mant;  // 1(implicit) + 7(m) + 12(pad) = 20 bits base
       logic [26:0] shifted_mant;
       logic [26:0] final_fixed;
-      logic [ 7:0] delta_e;
-
-      assign word = shift_target_data[(i*16)+:16];
-      assign sign = word[15];
-      assign e_val = word[14:7];
-      assign m_val = word[6:0];
 
       // 1. Prepare Magnitude (Add hidden bit)
       // We use a 27-bit container. Hidden bit is at [20].
-      assign base_mant = (e_val == 0) ? {7'b0, 8'h0, m_val, 12'b0} : {7'b0, 8'h1, m_val, 12'b0};
-      assign delta_e = shift_target_emax - e_val;
+      // Delta and base mantissa are registered to keep the 400 MHz shift path short.
 
       // 2. Align by Shifting Right
-      assign shifted_mant = (delta_e >= 27) ? 27'd0 : (base_mant >> delta_e);
+      assign shifted_mant = (shift_delta_e_lane[i] >= 27) ? 27'd0 :
+        (shift_base_mant_lane[i] >> shift_delta_e_lane[i]);
 
       // 3. Convert to 2's Complement if Sign is negative
       // This is CRITICAL for signed multiplication and accumulation in the engines.
-      assign final_fixed = sign ? (~shifted_mant + 1'b1) : shifted_mant;
+      assign final_fixed = shift_sign_lane[i] ? (~shifted_mant + 1'b1) : shifted_mant;
 
       assign shifted_mantissas[(i*27)+:27] = final_fixed;
     end
@@ -167,8 +217,8 @@ module preprocess_bf16_fixed_pipeline (
       m_axis_tvalid <= 1'b0;
       m_axis_tdata  <= 0;
     end else begin
-      m_axis_tvalid <= shift_trigger;
-      if (shift_trigger) begin
+      m_axis_tvalid <= shift_compute_valid;
+      if (shift_compute_valid) begin
         m_axis_tdata <= shifted_mantissas;
       end
     end
