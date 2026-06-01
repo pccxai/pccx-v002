@@ -56,6 +56,7 @@ module GEMV_accumulate
   logic [8:0] res_vec_idx;
   logic [16:0] num_recur;
   logic [11:0] index_of_result;
+  logic acc_active;
 
   // Preventing flip-flop replication: Direct-wire the internal accumulation register to the output port
   assign OUT_GEMV_result_vector = GEMV_result_vector;
@@ -65,18 +66,21 @@ module GEMV_accumulate
       OUT_acc_valid <= 0;
       res_vec_idx   <= 0;
       num_recur     <= 0;
+      acc_active    <= 1'b0;
       for (int vec_idx = 0; vec_idx < param.gemv_batch; vec_idx++) begin
         GEMV_result_vector[vec_idx] <= '0;
       end
     end else if (init) begin
       // new GEMV Acc start init pipeline
-      res_vec_idx <= 0;
-      num_recur   <= IN_num_recur;
+      OUT_acc_valid <= 1'b0;
+      res_vec_idx   <= 0;
+      num_recur     <= IN_num_recur;
+      acc_active    <= 1'b1;
     end else begin
 
       OUT_acc_valid <= 0;
 
-      if (IN_valid && ~OUT_acc_valid) begin
+      if (acc_active && IN_valid && (num_recur != 0)) begin
         GEMV_result_vector[res_vec_idx] <= GEMV_result_vector[res_vec_idx] + IN_reduction_result;
 
         // Modulo-2^N counter": Intended Overflow 509-> 510-> 511-> 0-> 1
@@ -84,8 +88,9 @@ module GEMV_accumulate
         num_recur <= num_recur - 1;
       end
 
-      if (num_recur == 0 && ~OUT_acc_valid) begin
+      if (acc_active && num_recur == 0) begin
         OUT_acc_valid <= 1;
+        acc_active <= 1'b0;
       end
     end
   end
