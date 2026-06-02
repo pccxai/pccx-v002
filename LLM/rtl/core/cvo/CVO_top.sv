@@ -76,7 +76,8 @@ module CVO_top (
   typedef enum logic [1:0] {
     ST_IDLE    = 2'b00,
     ST_RUNNING = 2'b01,
-    ST_DONE    = 2'b10
+    ST_DRAIN   = 2'b10,
+    ST_DONE    = 2'b11
   } cvo_state_e;
 
   cvo_state_e state;
@@ -86,6 +87,30 @@ module CVO_top (
   cvo_flags_t  uop_flags;
   logic [15:0] uop_length;
   logic [15:0] elem_count;   // elements processed in current operation
+  logic [15:0] expected_result_count;
+  logic [15:0] result_accept_count;
+
+  // ===| Result FIFO |===========================================================
+  // CVO sub-units are pipelined and cannot retract a result once it reaches the
+  // output boundary. Buffer results locally so downstream result_ready stalls do
+  // not drop one-cycle result-valid pulses.
+  localparam int ResultFifoDepth = 64;
+  localparam int ResultFifoMargin = 32;
+  localparam int ResultFifoPtrW = $clog2(ResultFifoDepth);
+  localparam logic [ResultFifoPtrW:0] ResultFifoDepthValue = ResultFifoDepth;
+  localparam logic [ResultFifoPtrW:0] ResultFifoAlmostFullValue =
+      ResultFifoDepth - ResultFifoMargin;
+
+  logic [15:0] result_fifo_q[0:ResultFifoDepth-1];
+  logic [ResultFifoPtrW-1:0] result_fifo_wr_ptr_q;
+  logic [ResultFifoPtrW-1:0] result_fifo_rd_ptr_q;
+  logic [ResultFifoPtrW:0]   result_fifo_count_q;
+  logic                      result_fifo_overflow_q;
+
+  wire result_fifo_empty = (result_fifo_count_q == '0);
+  wire result_fifo_full  = (result_fifo_count_q == ResultFifoDepthValue);
+  wire result_fifo_almost_full = (result_fifo_count_q >= ResultFifoAlmostFullValue);
+  wire result_fifo_pop = !result_fifo_empty && IN_result_ready;
 
   // ===| BF16 subtract e_max (combinational) |===================================
   // Implements x - e_max in BF16 via bf16_add(x, -e_max).
@@ -159,9 +184,14 @@ module CVO_top (
       uop_flags  <= '0;
       uop_length <= 16'd0;
       elem_count <= 16'd0;
+      expected_result_count <= 16'd0;
+      result_accept_count   <= 16'd0;
       OUT_done   <= 1'b0;
     end else begin
       OUT_done <= 1'b0;
+      if (result_fifo_pop) begin
+        result_accept_count <= result_accept_count + 16'd1;
+      end
 
       case (state)
         // ===| IDLE: wait for dispatch |===
@@ -171,6 +201,8 @@ module CVO_top (
             uop_flags  <= IN_uop.flags;
             uop_length <= IN_uop.length;
             elem_count <= 16'd0;
+            expected_result_count <= (IN_uop.cvo_func == CVO_REDUCE_SUM) ? 16'd1 : IN_uop.length;
+            result_accept_count   <= 16'd0;
             state      <= ST_RUNNING;
           end
         end
@@ -180,8 +212,16 @@ module CVO_top (
           if (IN_data_valid && OUT_data_ready) begin
             elem_count <= elem_count + 16'd1;
             if (elem_count == uop_length - 16'd1) begin
-              state    <= ST_DONE;
+              state    <= ST_DRAIN;
             end
+          end
+        end
+
+        // ===| DRAIN: wait until every produced result is accepted |============
+        ST_DRAIN: begin
+          if (result_fifo_pop &&
+              (result_accept_count + 16'd1 >= expected_result_count)) begin
+            state <= ST_DONE;
           end
         end
 
@@ -211,21 +251,50 @@ module CVO_top (
     end
   end
 
+  wire result_fifo_push = result_valid_mux_wire && (!result_fifo_full || result_fifo_pop);
+
+  always_ff @(posedge clk) begin
+    if (!rst_n || i_clear) begin
+      result_fifo_wr_ptr_q <= '0;
+      result_fifo_rd_ptr_q <= '0;
+      result_fifo_count_q  <= '0;
+      result_fifo_overflow_q <= 1'b0;
+    end else begin
+      if (result_fifo_push) begin
+        result_fifo_q[result_fifo_wr_ptr_q] <= result_mux_wire;
+        result_fifo_wr_ptr_q <= result_fifo_wr_ptr_q + {{(ResultFifoPtrW-1){1'b0}}, 1'b1};
+      end else if (result_valid_mux_wire && result_fifo_full && !result_fifo_pop) begin
+        result_fifo_overflow_q <= 1'b1;
+      end
+
+      if (result_fifo_pop) begin
+        result_fifo_rd_ptr_q <= result_fifo_rd_ptr_q + {{(ResultFifoPtrW-1){1'b0}}, 1'b1};
+      end
+
+      unique case ({result_fifo_push, result_fifo_pop})
+        2'b10: result_fifo_count_q <= result_fifo_count_q + {{ResultFifoPtrW{1'b0}}, 1'b1};
+        2'b01: result_fifo_count_q <= result_fifo_count_q - {{ResultFifoPtrW{1'b0}}, 1'b1};
+        default: begin
+        end
+      endcase
+    end
+  end
+
   // ===| Output Registers |======================================================
   always_ff @(posedge clk) begin
     if (!rst_n || i_clear) begin
       OUT_result       <= 16'd0;
       OUT_result_valid <= 1'b0;
     end else begin
-      OUT_result       <= result_mux_wire;
-      OUT_result_valid <= result_valid_mux_wire && IN_result_ready;
+      OUT_result       <= result_fifo_empty ? OUT_result : result_fifo_q[result_fifo_rd_ptr_q];
+      OUT_result_valid <= !result_fifo_empty;
     end
   end
 
   // ===| Status & Control |======================================================
   assign OUT_busy      = (state != ST_IDLE);
   assign OUT_uop_ready = (state == ST_IDLE);
-  assign OUT_data_ready = sfu_ready && (state == ST_RUNNING);
+  assign OUT_data_ready = sfu_ready && (state == ST_RUNNING) && !result_fifo_almost_full;
   assign OUT_accm      = uop_flags.accm;
 
 endmodule
