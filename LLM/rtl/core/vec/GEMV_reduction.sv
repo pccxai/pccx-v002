@@ -15,9 +15,9 @@
 // Spec ref     : pccx v002 §2.3.3 (reduction tree).
 // Clock        : clk @ 400 MHz.
 // Reset        : rst_n active-low.
-// Topology     : Stage 1 — 16 × DSP48E2 (USE_SIMD = "ONE48"): 32 → 16.
-//                Stages 2-5 — LUT-based pipelined adders: 16 → 8 → 4 → 2 → 1.
-// Latency      : REDUCTION_LATENCY = 5 cycles (one per stage).
+// Topology     : Five registered signed adder stages: 32 → 16 → 8 → 4 → 2 → 1.
+// Latency      : REDUCTION_LATENCY = 6 cycles (LUT capture + five reduction
+//                stages).
 // Throughput   : 1 reduction per cycle in steady state.
 // Handshake    : Push-only; IN_valid is OR'd with IN_is_lane_active to
 //                gate the pipeline.
@@ -29,7 +29,7 @@ module GEMV_reduction
   import vec_core_pkg::*;
 #(
     parameter gemv_cfg_t param = VecCoreDefaultCfg,
-    parameter int REDUCTION_LATENCY = 5
+    parameter int REDUCTION_LATENCY = 6
 ) (
     input logic clk,
     input logic rst_n,
@@ -42,7 +42,8 @@ module GEMV_reduction
     output logic OUT_reduction_res_valid
 );
   // ===| pipeline Valid sync REG |===
-  // REDUCTION_LATENCY(5) Shift Register
+  // REDUCTION_LATENCY shift register. The first cycle captures the LUT-indexed
+  // lane values before the five-stage reduction tree can consume them.
   logic [REDUCTION_LATENCY-1:0] valid_pipe;
 
   always_ff @(posedge clk) begin
@@ -58,15 +59,15 @@ module GEMV_reduction
   assign OUT_reduction_res_valid = valid_pipe[REDUCTION_LATENCY-1];
 
   //2^5
-  logic [param.fixed_mant_width+2:0] reduction_32_fmap_wire[0:31];
+  logic signed [param.fixed_mant_width+2:0] reduction_32_fmap_wire[0:31];
   //2^4
-  logic [param.fixed_mant_width+2:0] reduction_16_fmap_wire[0:15];
+  logic signed [param.fixed_mant_width+2:0] reduction_16_fmap_wire[0:15];
   //2^3
-  logic [param.fixed_mant_width+2:0] reduction_8_fmap_wire [ 0:7];
+  logic signed [param.fixed_mant_width+2:0] reduction_8_fmap_wire [ 0:7];
   //2^2
-  logic [param.fixed_mant_width+2:0] reduction_4_fmap_wire [ 0:3];
+  logic signed [param.fixed_mant_width+2:0] reduction_4_fmap_wire [ 0:3];
   //2^1
-  logic [param.fixed_mant_width+2:0] reduction_2_fmap_wire [ 0:1];
+  logic signed [param.fixed_mant_width+2:0] reduction_2_fmap_wire [ 0:1];
 
   always_ff @(posedge clk) begin
     if (!rst_n) begin
@@ -83,62 +84,19 @@ module GEMV_reduction
   end
 
   // ===| Stage 1: Reduction 32 -> 16 |==========================================
-  // Instantiates 16 DSP48E2 slices to add adjacent pairs of the 32 input wires
-  // ============================================================================
-  generate
-    genvar i;
-    for (i = 0; i < 16; i++) begin : gen_dsp_reduce_32_to_16
-
-      // --- Internal 48-bit wires for DSP port matching ---
-      logic [47:0] dsp_in_ab;
-      logic [47:0] dsp_in_c;
-      logic [47:0] dsp_out_p;
-
-      // Map inputs to 48-bit width (Zero or Sign extension depending on your data)
-      // Operand 1: Even index (2*i) -> Routed to A:B ports
-      // Operand 2: Odd index (2*i+1) -> Routed to C port
-      assign dsp_in_ab = 48'(reduction_32_fmap_wire[2*i]);
-      assign dsp_in_c  = 48'(reduction_32_fmap_wire[2*i+1]);
-
-      DSP48E2 #(
-          // [IMPORTANT] Changed from "TWO24" to "ONE48" for standard addition.
-          // "TWO24" breaks the carry chain at bit 24. Use "ONE48" for full precision.
-          .USE_SIMD("ONE48"),
-
-          // --- Register Control (0 = Comb, 1 = Registered) ---
-          .AREG(0),
-          .ACASCREG(0),
-          .BREG(0),
-          .BCASCREG(0),
-          .CREG(0),
-          .PREG(1)   // Enable P register (1 clock delay for sum)
-      ) u_dsp (
-          // --- Clock and Reset ---
-          .CLK (clk),
-          .RSTP(~rst_n), // Reset for P register (Active High inside DSP)
-
-          // --- Operation Mode (Fixed for A:B + C) ---
-          .ALUMODE(4'b0000),         // 0000 = ADD
-          .INMODE (5'b00000),        // Default A and B routing
-          .OPMODE (9'b000_00_11_11), // Z=0, W=0, Y=C, X=A:B  =>  P = A:B + C
-
-          // --- Clock Enables (Tie to high for continuous pipeline) ---
-          .CEP(1'b1),  // Enable P register updates
-
-          // --- Data Inputs ---
-          .A(dsp_in_ab[47:18]),  // Upper 30 bits go to A port
-          .B(dsp_in_ab[17:0]),   // Lower 18 bits go to B port
-          .C(dsp_in_c),          // 48 bits go to C port
-
-          // --- Data Output ---
-          .P(dsp_out_p)  // 48-bit Result
-      );
-
-      // --- Truncate 48-bit result back to parameterized wire width ---
-      assign reduction_16_fmap_wire[i] = dsp_out_p[param.fmap_cache_out_cnt+2:0];
+  // Latency: 1 Clock Cycle
+  always_ff @(posedge clk) begin
+    if (!rst_n) begin
+      for (int i = 0; i < 16; i++) begin
+        reduction_16_fmap_wire[i] <= '0;
+      end
+    end else begin
+      for (int i = 0; i < 16; i++) begin
+        reduction_16_fmap_wire[i] <= reduction_32_fmap_wire[2*i] + reduction_32_fmap_wire[2*i+1];
+      end
     end
-  endgenerate
-  // ============================================================================
+  end
+
   // ===| REDUCTION TREE: LUT-based Pipelined Adders (Optimized for 400MHz) |====
   // UltraScale+ CARRY8 primitives combined with immediate FDRE (Registers)
   // provide better routing and timing than forcing DSPs for simple additions.
@@ -199,13 +157,14 @@ module GEMV_reduction
 
   // ============================================================================
   // Total Pipeline Latency for Reduction Tree:
-  // Stage 1 (DSP: 32->16) : 1 Cycle (or more depending on DSP PREG/MREG configs)
+  // LUT capture              : 1 Cycle
+  // Stage 1 (32->16)       : 1 Cycle
   // Stage 2 (LUT: 16->8)  : 1 Cycle
   // Stage 3 (LUT: 8->4)   : 1 Cycle
   // Stage 4 (LUT: 4->2)   : 1 Cycle
   // Stage 5 (LUT: 2->1)   : 1 Cycle
   // ----------------------------------------
-  // Total latency after FMap/Weight input: 5 Cycles
+  // Total latency after FMap/Weight input: 6 Cycles
   // ============================================================================
 
 endmodule
