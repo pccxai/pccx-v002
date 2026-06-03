@@ -13,9 +13,9 @@ import vec_core_pkg::*;
 import bf16_math_pkg::*;
 
 // ===| Module: pccx_npu_top — pccx v002 SoC integration wrapper |===============
-// Purpose      : Top-level integration of all v002 NPU subsystems on KV260.
-// Spec ref     : pccx v002 §1 (architecture overview), §6 (KV260 target).
-// Target       : Xilinx Kria KV260 (xck26-sfvc784-2LV-c), ZU5EV.
+// Purpose      : Top-level integration of all v002 NPU IP-core subsystems.
+// Spec ref     : pccx v002 architecture overview.
+// Target       : FPGA SoC integration wrapper.
 // Clock        : clk_core @ 400 MHz (compute), clk_axi @ 250 MHz (HP/AXIL).
 // Reset        : rst_n_core / rst_axi_n active-low. Synchronous release.
 // Soft-clear   : i_clear (active-high, sync) — combined with reset wherever
@@ -249,6 +249,19 @@ module pccx_npu_top (
   logic [`DSP48E2_POUT_SIZE-1:0] raw_res_sum      [0:`ARRAY_SIZE_H-1];
   logic                          raw_res_sum_valid[0:`ARRAY_SIZE_H-1];
   logic [   `BF16_EXP_WIDTH-1:0] delayed_emax_32  [0:`ARRAY_SIZE_H-1];
+  logic [                    2:0] gemm_global_inst_aligned;
+  logic                           gemm_global_inst_valid_aligned;
+
+  GEMM_inst_fmap_aligner u_gemm_inst_fmap_aligner (
+      .clk                   (clk_core),
+      .rst_n                 (rst_n_core),
+      .i_clear               (i_clear),
+      .i_gemm_op_valid       (GEMM_op_x64_valid_wire),
+      .i_gemm_inst_registered(GEMM_uop_wire.flags[5:3]),
+      .i_fmap_valid          (fmap_broadcast_valid),
+      .o_global_inst         (gemm_global_inst_aligned),
+      .o_global_inst_valid   (gemm_global_inst_valid_aligned)
+  );
 
   // ===| v002 dual-lane weight unpack |=========================================
   // HP0 / HP1 each carry a 128-bit AXIS word that holds 32 INT4 weights.
@@ -272,8 +285,8 @@ module pccx_npu_top (
       .i_clear(i_clear),
 
       .global_weight_valid(M_CORE_HP0_WEIGHT.tvalid),
-      .global_inst        (GEMM_uop_wire.flags[5:3]),
-      .global_inst_valid  (GEMM_op_x64_valid_wire),
+      .global_inst        (gemm_global_inst_aligned),
+      .global_inst_valid  (gemm_global_inst_valid_aligned),
 
       .IN_fmap_broadcast      (fmap_broadcast),
       .IN_fmap_broadcast_valid(fmap_broadcast_valid),

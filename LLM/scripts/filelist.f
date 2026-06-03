@@ -48,6 +48,7 @@ LLM/rtl/core/mat/GEMM_dsp_unit_last_ROW.sv
 LLM/rtl/core/mat/GEMM_accumulator.sv
 LLM/rtl/core/mat/GEMM_fmap_staggered_delay.sv
 LLM/rtl/core/mat/GEMM_weight_dispatcher.sv
+LLM/rtl/core/mat/GEMM_inst_fmap_aligner.sv
 LLM/rtl/core/mat/GEMM_systolic_array.sv
 LLM/rtl/core/mat/GEMM_systolic_top.sv
 LLM/rtl/core/mat/FROM_mat_result_packer.sv
