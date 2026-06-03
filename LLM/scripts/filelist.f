@@ -43,6 +43,7 @@ LLM/rtl/core/memory/Constant_Memory/shape_const_ram.sv
 # ===| MAT core |==============================================================
 LLM/rtl/core/mat/GEMM_dsp_packer.sv
 LLM/rtl/core/mat/GEMM_sign_recovery.sv
+LLM/rtl/core/mat/GEMM_dual_mac_recover.sv
 LLM/rtl/core/mat/GEMM_dsp_unit.sv
 LLM/rtl/core/mat/GEMM_dsp_unit_last_ROW.sv
 LLM/rtl/core/mat/GEMM_accumulator.sv
