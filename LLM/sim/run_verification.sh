@@ -27,7 +27,17 @@ PCCX_LAB_DIR="${PCCX_LAB_DIR:-$PKG_DIR/../pccx-lab}"
 PCCX_CLI_BIN="$PCCX_LAB_DIR/target/release/from_xsim_log"
 SMOKE_PROGRAM_TOOL="${PCCX_SMOKE_PROGRAM_TOOL:-}"
 VIVADO_ROOT="${XILINX_VIVADO:-}"
-GLBL_V="${VIVADO_ROOT:+$VIVADO_ROOT/ids_lite/ISE/verilog/src/glbl.v}"
+GLBL_V=""
+if [[ -n "$VIVADO_ROOT" ]]; then
+    for candidate in \
+        "$VIVADO_ROOT/data/verilog/src/glbl.v" \
+        "$VIVADO_ROOT/ids_lite/ISE/verilog/src/glbl.v"; do
+        if [[ -f "$candidate" ]]; then
+            GLBL_V="$candidate"
+            break
+        fi
+    done
+fi
 
 # ─── Per-testbench RTL dependency map ───────────────────────────────────────
 # Each entry lists the .sv modules xvlog must pick up, relative to the package root.
@@ -35,8 +45,11 @@ declare -A TB_DEPS=(
     [tb_shape_const_ram]="LLM/rtl/packages/isa/isa_pkg.sv LLM/rtl/core/memory/Constant_Memory/shape_const_ram.sv"
     [tb_mem_dispatcher_shape_lookup]="LLM/rtl/packages/isa/isa_pkg.sv common/rtl/packages/perf_counter_pkg.sv common/rtl/interfaces/npu_interfaces.svh LLM/rtl/core/memory/Constant_Memory/shape_const_ram.sv LLM/rtl/core/memory/mem_u_operation_queue.sv LLM/rtl/core/memory/mem_BUFFER.sv LLM/rtl/core/memory/mem_L2_cache_fmap.sv LLM/rtl/core/memory/mem_GLOBAL_cache.sv LLM/rtl/core/memory/mem_CVO_stream_bridge.sv LLM/rtl/core/memory/mem_dispatcher.sv"
     [tb_GEMM_dsp_packer_sign_recovery]="LLM/rtl/core/mat/GEMM_dsp_packer.sv LLM/rtl/core/mat/GEMM_sign_recovery.sv"
+    [tb_GEMM_dsp_unit_mac_ce_contract]="LLM/rtl/core/mat/GEMM_dsp_packer.sv LLM/rtl/core/mat/GEMM_dsp_unit.sv LLM/rtl/core/mat/GEMM_dsp_unit_last_ROW.sv"
     [tb_mat_result_normalizer]="common/rtl/packages/dtype_pkg.sv LLM/rtl/core/mat/mat_result_normalizer.sv"
     [tb_GEMM_weight_dispatcher]="LLM/rtl/core/mat/GEMM_weight_dispatcher.sv"
+    [tb_GEMM_systolic_weight_valid_contract]="LLM/rtl/core/mat/GEMM_weight_dispatcher.sv LLM/rtl/core/mat/GEMM_fmap_staggered_delay.sv LLM/rtl/core/mat/GEMM_dsp_packer.sv LLM/rtl/core/mat/GEMM_dsp_unit.sv LLM/rtl/core/mat/GEMM_dsp_unit_last_ROW.sv LLM/rtl/core/mat/GEMM_accumulator.sv LLM/rtl/core/mat/GEMM_systolic_array.sv LLM/rtl/core/mat/GEMM_systolic_top.sv"
+    [tb_mem_HP_buffer_to_GEMM_weight_dispatcher_skew]="common/rtl/interfaces/npu_interfaces.svh LLM/rtl/core/memory/mem_HP_buffer.sv LLM/rtl/core/mat/GEMM_weight_dispatcher.sv"
     [tb_FROM_mat_result_packer]="LLM/rtl/core/mat/FROM_mat_result_packer.sv"
     [tb_barrel_shifter_BF16]="common/rtl/wrappers/barrel_shifter_BF16.sv"
     [tb_ctrl_npu_decoder]="LLM/rtl/packages/isa/isa_pkg.sv LLM/rtl/core/controller/ctrl_npu_decoder.sv"
@@ -51,8 +64,11 @@ declare -A TB_CORE=(
     [tb_shape_const_ram]=0
     [tb_mem_dispatcher_shape_lookup]=1
     [tb_GEMM_dsp_packer_sign_recovery]=2
+    [tb_GEMM_dsp_unit_mac_ce_contract]=11
     [tb_mat_result_normalizer]=3
     [tb_GEMM_weight_dispatcher]=4
+    [tb_GEMM_systolic_weight_valid_contract]=12
+    [tb_mem_HP_buffer_to_GEMM_weight_dispatcher_skew]=13
     [tb_FROM_mat_result_packer]=5
     [tb_barrel_shifter_BF16]=6
     [tb_ctrl_npu_decoder]=7
@@ -65,8 +81,11 @@ TB_LIST=(
     tb_shape_const_ram
     tb_mem_dispatcher_shape_lookup
     tb_GEMM_dsp_packer_sign_recovery
+    tb_GEMM_dsp_unit_mac_ce_contract
     tb_mat_result_normalizer
     tb_GEMM_weight_dispatcher
+    tb_GEMM_systolic_weight_valid_contract
+    tb_mem_HP_buffer_to_GEMM_weight_dispatcher_skew
     tb_FROM_mat_result_packer
     tb_barrel_shifter_BF16
     tb_ctrl_npu_decoder
@@ -195,7 +214,8 @@ run_tb() {
         # -L xpm: needed for TBs that compile xpm_fifo_sync (e.g. the
         # mem_u_operation_queue queue smoke). No-op for TBs that don't.
         # glbl: needed for XPM async CDC models used by dispatcher-level TBs.
-        xelab -L xpm -debug typical "$tb" "${glbl_top_args[@]}" -s snap >xelab.log 2>&1
+        xelab -L xpm -L unisims_ver -L unimacro_ver -L secureip \
+            -debug typical "$tb" "${glbl_top_args[@]}" -s snap >xelab.log 2>&1
 
         echo "  [xsim]"
         xsim snap -R >xsim.log 2>&1

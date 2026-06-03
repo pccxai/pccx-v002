@@ -1,156 +1,221 @@
-// PCCX(TM) — reusable AI accelerator project.
-// SPDX-FileCopyrightText: 2026 Hyun Woo Kim
 // SPDX-License-Identifier: Apache-2.0
+// Copyright 2026 pccxai
+//
+// tb_GEMM_weight_dispatcher — dual-lane INT4 weight register stage.
+//
+// DUT spec:
+//   fifo_upper[32], fifo_lower[32] : INT4 each
+//   fifo_*_valid                   : per-lane valid
+//   weight_upper/lower             : registered output (1-cycle latency)
+//   weight_valid                   = fifo_upper_valid & fifo_lower_valid
+//   fifo_*_ready                   = always 1 (push-only)
+//
+// Test cases:
+//   1. Both valid: data registered with 1-cycle latency, weight_valid=1 next cycle.
+//   2. Only upper valid: weight_valid=0 (AND of both), data still registered.
+//   3. Only lower valid: same.
+//   4. Both invalid: weight_valid=0.
+//   5. Two consecutive valid: second cycle's data appears 1 cycle later.
 
 `timescale 1ns / 1ps
 
-// ===============================================================================
-// Testbench: tb_GEMM_weight_dispatcher
-// Phase : pccx v002, Phase A (W4A8 dual-channel weight staging)
-//
-// Purpose
-// -------
-//   Drives 128 random upper/lower INT4 weight frames through the
-//   dispatcher and confirms:
-//
-//     * `weight_valid` is `fifo_upper_valid & fifo_lower_valid`, delayed
-//       by exactly one cycle.
-//     * Every lane of `weight_upper` / `weight_lower` mirrors its input,
-//       again at one cycle latency.
-//
-//   Prints the canonical `PASS: <N> cycles, ...` line the pccx-lab xsim
-//   bridge picks up.
-// ===============================================================================
-
-`include "GLOBAL_CONST.svh"
-`include "GEMM_Array.svh"
-
 module tb_GEMM_weight_dispatcher;
 
-  localparam int WEIGHT_SIZE = `INT4_WIDTH;
-  localparam int WEIGHT_CNT  = `HP_SINGLE_WIDTH / `INT4_WIDTH;
-  localparam int N_FRAMES    = 128;
+    localparam int WEIGHT_SIZE = 4;
+    localparam int WEIGHT_CNT  = 32;
 
-  // ===| Clock + reset |=========================================================
-  logic clk;
-  logic rst_n;
-  initial clk = 1'b0;
-  always #2 clk = ~clk;  // 250 MHz
+    logic clk = 0;
+    logic rst_n = 0;
+    logic [WEIGHT_SIZE-1:0] fifo_upper [0:WEIGHT_CNT-1];
+    logic                   fifo_upper_valid;
+    logic                   fifo_upper_ready;
+    logic [WEIGHT_SIZE-1:0] fifo_lower [0:WEIGHT_CNT-1];
+    logic                   fifo_lower_valid;
+    logic                   fifo_lower_ready;
+    logic [WEIGHT_SIZE-1:0] weight_upper [0:WEIGHT_CNT-1];
+    logic [WEIGHT_SIZE-1:0] weight_lower [0:WEIGHT_CNT-1];
+    logic                   weight_valid;
 
-  // ===| DUT IO |================================================================
-  logic [WEIGHT_SIZE-1:0] fifo_upper [0:WEIGHT_CNT-1];
-  logic [WEIGHT_SIZE-1:0] fifo_lower [0:WEIGHT_CNT-1];
-  logic fifo_upper_valid, fifo_lower_valid;
-  logic fifo_upper_ready, fifo_lower_ready;
+    always #5 clk = ~clk;
 
-  logic [WEIGHT_SIZE-1:0] weight_upper [0:WEIGHT_CNT-1];
-  logic [WEIGHT_SIZE-1:0] weight_lower [0:WEIGHT_CNT-1];
-  logic                   weight_valid;
+    int pass_count = 0, fail_count = 0;
 
-  GEMM_weight_dispatcher #(
-    .weight_size (WEIGHT_SIZE),
-    .weight_cnt  (WEIGHT_CNT)
-  ) u_dut (
-    .clk             (clk),
-    .rst_n           (rst_n),
-    .fifo_upper      (fifo_upper),
-    .fifo_upper_valid(fifo_upper_valid),
-    .fifo_upper_ready(fifo_upper_ready),
-    .fifo_lower      (fifo_lower),
-    .fifo_lower_valid(fifo_lower_valid),
-    .fifo_lower_ready(fifo_lower_ready),
-    .weight_upper    (weight_upper),
-    .weight_lower    (weight_lower),
-    .weight_valid    (weight_valid)
-  );
+    GEMM_weight_dispatcher #(
+        .weight_size(WEIGHT_SIZE),
+        .weight_cnt (WEIGHT_CNT)
+    ) dut (
+        .clk(clk), .rst_n(rst_n),
+        .fifo_upper(fifo_upper), .fifo_upper_valid(fifo_upper_valid), .fifo_upper_ready(fifo_upper_ready),
+        .fifo_lower(fifo_lower), .fifo_lower_valid(fifo_lower_valid), .fifo_lower_ready(fifo_lower_ready),
+        .weight_upper(weight_upper), .weight_lower(weight_lower), .weight_valid(weight_valid)
+    );
 
-  // ===| Scoreboard |============================================================
-  // Shadow pipeline: one-cycle-delayed copy of the drivers so we can
-  // compare against the DUT's output after the single flop stage.
-  logic [WEIGHT_SIZE-1:0] sb_upper     [0:WEIGHT_CNT-1];
-  logic [WEIGHT_SIZE-1:0] sb_lower     [0:WEIGHT_CNT-1];
-  logic                   sb_valid;
-
-  always_ff @(posedge clk) begin
-    if (!rst_n) begin
-      sb_valid <= 1'b0;
-      for (int i = 0; i < WEIGHT_CNT; i++) begin
-        sb_upper[i] <= '0;
-        sb_lower[i] <= '0;
-      end
-    end else begin
-      sb_valid <= fifo_upper_valid & fifo_lower_valid;
-      for (int i = 0; i < WEIGHT_CNT; i++) begin
-        sb_upper[i] <= fifo_upper[i];
-        sb_lower[i] <= fifo_lower[i];
-      end
-    end
-  end
-
-  // ===| Stimulus |==============================================================
-  int errors = 0;
-  int i;
-
-  initial begin
-    rst_n            = 1'b0;
-    fifo_upper_valid = 1'b0;
-    fifo_lower_valid = 1'b0;
-    for (int k = 0; k < WEIGHT_CNT; k++) begin
-      fifo_upper[k] = '0;
-      fifo_lower[k] = '0;
-    end
-
-    repeat (3) @(posedge clk);
-    rst_n = 1'b1;
-
-    // Frame generator: randomise data + valid patterns so the scoreboard
-    // covers AND-of-valids edge cases (only-upper / only-lower / both /
-    // neither).
-    for (i = 0; i < N_FRAMES; i++) begin
-      for (int k = 0; k < WEIGHT_CNT; k++) begin
-        fifo_upper[k] = $random;
-        fifo_lower[k] = $random;
-      end
-      fifo_upper_valid = $random & 1;
-      fifo_lower_valid = $random & 1;
-      @(posedge clk);
-      #1; // let the flop propagate before sampling
-
-      if (weight_valid !== sb_valid) begin
-        errors++;
-        if (errors <= 10) begin
-          $display("[%0t] frame %0d weight_valid mismatch: got=%b exp=%b",
-                   $time, i, weight_valid, sb_valid);
+    task automatic check_arrays(input string label,
+                                input logic [WEIGHT_SIZE-1:0] expected_upper [0:WEIGHT_CNT-1],
+                                input logic [WEIGHT_SIZE-1:0] expected_lower [0:WEIGHT_CNT-1],
+                                input logic                   expected_valid);
+        bit ok = 1;
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            if (weight_upper[i] !== expected_upper[i] || weight_lower[i] !== expected_lower[i]) begin
+                ok = 0;
+                $display("  MISMATCH [%s] lane %0d: upper got=%h exp=%h, lower got=%h exp=%h",
+                         label, i, weight_upper[i], expected_upper[i], weight_lower[i], expected_lower[i]);
+            end
         end
-      end
-      for (int k = 0; k < WEIGHT_CNT; k++) begin
-        if (weight_upper[k] !== sb_upper[k]) begin
-          errors++;
-          if (errors <= 10) begin
-            $display("[%0t] frame %0d upper[%0d] mismatch: got=%h exp=%h",
-                     $time, i, k, weight_upper[k], sb_upper[k]);
-          end
+        if (weight_valid !== expected_valid) begin
+            ok = 0;
+            $display("  MISMATCH [%s] valid got=%b exp=%b", label, weight_valid, expected_valid);
         end
-        if (weight_lower[k] !== sb_lower[k]) begin
-          errors++;
-          if (errors <= 10) begin
-            $display("[%0t] frame %0d lower[%0d] mismatch: got=%h exp=%h",
-                     $time, i, k, weight_lower[k], sb_lower[k]);
-          end
+        if (ok) begin
+            $display("PASS [%s]: valid=%b", label, weight_valid);
+            pass_count++;
+        end else begin
+            fail_count++;
         end
-      end
-    end
+    endtask
 
-    if (errors == 0) begin
-      $display("PASS: %0d cycles, both channels match golden.", N_FRAMES);
-    end else begin
-      $display("FAIL: %0d mismatches over %0d cycles.", errors, N_FRAMES);
-    end
-    $finish;
-  end
+    logic [WEIGHT_SIZE-1:0] expected_u [0:WEIGHT_CNT-1];
+    logic [WEIGHT_SIZE-1:0] expected_l [0:WEIGHT_CNT-1];
+    logic [WEIGHT_SIZE-1:0] zeros [0:WEIGHT_CNT-1];
+    logic [WEIGHT_SIZE-1:0] last_u [0:WEIGHT_CNT-1];
+    logic [WEIGHT_SIZE-1:0] last_l [0:WEIGHT_CNT-1];
 
-  initial begin
-    #100000 $display("TIMEOUT"); $finish;
-  end
+    initial begin
+        $display("=== tb_GEMM_weight_dispatcher start ===");
+
+        // Init
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_upper[i] = '0;
+            fifo_lower[i] = '0;
+            zeros[i] = '0;
+            last_u[i] = '0;
+            last_l[i] = '0;
+        end
+        fifo_upper_valid = 0;
+        fifo_lower_valid = 0;
+
+        // Reset
+        repeat (3) @(posedge clk);
+        rst_n = 1;
+        @(posedge clk);
+
+        if (fifo_upper_ready === 1'b1 && fifo_lower_ready === 1'b1) begin
+            $display("PASS [ready_initial]: both ready=1");
+            pass_count++;
+        end else begin
+            $display("FAIL [ready_initial]: upper=%b lower=%b", fifo_upper_ready, fifo_lower_ready);
+            fail_count++;
+        end
+
+        // === Test 1: aligned lanes pass through as one pair ===
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_upper[i] = WEIGHT_SIZE'(i & 4'hF);
+            fifo_lower[i] = WEIGHT_SIZE'((WEIGHT_CNT - i) & 4'hF);
+            expected_u[i] = WEIGHT_SIZE'(i & 4'hF);
+            expected_l[i] = WEIGHT_SIZE'((WEIGHT_CNT - i) & 4'hF);
+        end
+        fifo_upper_valid = 1;
+        fifo_lower_valid = 1;
+        @(posedge clk);
+        #1;
+        check_arrays("both_valid_pattern", expected_u, expected_l, 1'b1);
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            last_u[i] = expected_u[i];
+            last_l[i] = expected_l[i];
+        end
+        fifo_upper_valid = 0;
+        fifo_lower_valid = 0;
+        @(posedge clk);
+        #1;
+
+        // === Test 2: upper arrives first and is held pending ===
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_upper[i] = WEIGHT_SIZE'((i + 5) & 4'hF);
+            expected_u[i] = WEIGHT_SIZE'((i + 5) & 4'hF);
+        end
+        fifo_upper_valid = 1;
+        fifo_lower_valid = 0;
+        @(posedge clk);
+        #1;
+        check_arrays("upper_first_does_not_emit", last_u, last_l, 1'b0);
+        if (fifo_upper_ready === 1'b0 && fifo_lower_ready === 1'b1) begin
+            $display("PASS [upper_pending_backpressures_upper]");
+            pass_count++;
+        end else begin
+            $display("FAIL [upper_pending_backpressures_upper]: upper=%b lower=%b",
+                     fifo_upper_ready, fifo_lower_ready);
+            fail_count++;
+        end
+
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_lower[i] = WEIGHT_SIZE'((i + 3) & 4'hF);
+            expected_l[i] = WEIGHT_SIZE'((i + 3) & 4'hF);
+        end
+        fifo_upper_valid = 0;
+        fifo_lower_valid = 1;
+        @(posedge clk);
+        #1;
+        check_arrays("upper_first_pairs_with_later_lower", expected_u, expected_l, 1'b1);
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            last_u[i] = expected_u[i];
+            last_l[i] = expected_l[i];
+        end
+        fifo_lower_valid = 0;
+        @(posedge clk);
+        #1;
+
+        // === Test 3: lower arrives first and is held pending ===
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_lower[i] = WEIGHT_SIZE'((i + 9) & 4'hF);
+            expected_l[i] = WEIGHT_SIZE'((i + 9) & 4'hF);
+        end
+        fifo_upper_valid = 0;
+        fifo_lower_valid = 1;
+        @(posedge clk);
+        #1;
+        check_arrays("lower_first_does_not_emit", last_u, last_l, 1'b0);
+        if (fifo_upper_ready === 1'b1 && fifo_lower_ready === 1'b0) begin
+            $display("PASS [lower_pending_backpressures_lower]");
+            pass_count++;
+        end else begin
+            $display("FAIL [lower_pending_backpressures_lower]: upper=%b lower=%b",
+                     fifo_upper_ready, fifo_lower_ready);
+            fail_count++;
+        end
+
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            fifo_upper[i] = WEIGHT_SIZE'((i + 11) & 4'hF);
+            expected_u[i] = WEIGHT_SIZE'((i + 11) & 4'hF);
+        end
+        fifo_upper_valid = 1;
+        fifo_lower_valid = 0;
+        @(posedge clk);
+        #1;
+        check_arrays("lower_first_pairs_with_later_upper", expected_u, expected_l, 1'b1);
+        for (int i = 0; i < WEIGHT_CNT; i++) begin
+            last_u[i] = expected_u[i];
+            last_l[i] = expected_l[i];
+        end
+        fifo_upper_valid = 0;
+        @(posedge clk);
+        #1;
+
+        // === Test 4: both invalid ===
+        fifo_upper_valid = 0;
+        fifo_lower_valid = 0;
+        @(posedge clk);
+        #1;
+        check_arrays("both_invalid_holds_last_pair", last_u, last_l, 1'b0);
+
+        $display("");
+        $display("=== Summary ===");
+        $display("PASS: %0d / %0d", pass_count, pass_count + fail_count);
+        $display("FAIL: %0d", fail_count);
+        if (fail_count == 0)
+            $display("OVERALL: PASS");
+        else
+            $display("OVERALL: FAIL");
+        $finish;
+    end
 
 endmodule

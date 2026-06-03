@@ -118,7 +118,7 @@ module GEMM_dsp_unit_last_ROW #(
   end
 
   logic dsp_ce_p;
-  assign dsp_ce_p = current_inst[0] | is_flushing;
+  assign dsp_ce_p = (current_inst[0] & i_valid) | is_flushing;
 
   // ===| Weight latch + horizontal shift |========================================
   logic [INT4_BITS-1:0] w_upper_reg;

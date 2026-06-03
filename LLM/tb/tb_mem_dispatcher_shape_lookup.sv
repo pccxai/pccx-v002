@@ -178,6 +178,7 @@ module tb_mem_dispatcher_shape_lookup;
       };
       mem_set_uop_valid = 1'b1;
       @(posedge clk_core);
+      #1;
       mem_set_uop_valid = 1'b0;
       @(posedge clk_core);
       set_memset_idle();
@@ -210,8 +211,8 @@ module tb_mem_dispatcher_shape_lookup;
       };
       load_uop_valid = 1'b1;
       @(posedge clk_core);
-      load_uop_valid = 1'b0;
       #1;
+      load_uop_valid = 1'b0;
 
       for (int i = 0; i < 20; i++) begin
         if (dut.acp_rx_start === 1'b1) break;
@@ -263,8 +264,8 @@ module tb_mem_dispatcher_shape_lookup;
       };
       load_uop_valid = 1'b1;
       @(posedge clk_core);
-      load_uop_valid = 1'b0;
       #1;
+      load_uop_valid = 1'b0;
 
       for (int i = 0; i < 20; i++) begin
         if (dut.npu_rx_start === 1'b1) break;

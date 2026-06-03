@@ -15,10 +15,9 @@
 // Width        : weight_size (= INT4 = 4) × weight_cnt (= 32).
 // Latency      : 1 register stage (input → weight_upper/lower / weight_valid).
 // Throughput   : 1 dual-INT4 vector per cycle while both lanes valid.
-// Handshake    : fifo_upper_ready / fifo_lower_ready tied to 1'b1 — module
-//                is push-only and never stalls. Misaligned valids starve
-//                the array of pairs (weight_valid is fifo_upper_valid &
-//                fifo_lower_valid).
+// Handshake    : One pending beat per lane. If HP0/HP1 arrive skewed, the
+//                early lane is buffered and backpressured until the matching
+//                lane arrives. Aligned streams still run at 1 pair/cycle.
 // Reset state  : weight_upper/lower zeroed; weight_valid = 0.
 // Counters     : none.
 // Migration    : v001 had a single 32 × INT4 stream; v002 needs two
@@ -52,27 +51,63 @@ module GEMM_weight_dispatcher #(
   (* max_fanout = 32 *) output logic weight_valid
 );
 
-  // ===| Flow control — always accept while the pipeline is not stalled |=======
-  assign fifo_upper_ready = 1'b1;
-  assign fifo_lower_ready = 1'b1;
+  // ===| One-beat lane pairer |==================================================
+  logic [weight_size-1:0] pending_upper[0:weight_cnt-1];
+  logic [weight_size-1:0] pending_lower[0:weight_cnt-1];
+  logic                   pending_upper_valid;
+  logic                   pending_lower_valid;
+  logic                   upper_accept;
+  logic                   lower_accept;
+  logic                   have_upper;
+  logic                   have_lower;
+  logic                   pair_fire;
+
+  assign fifo_upper_ready = !pending_upper_valid;
+  assign fifo_lower_ready = !pending_lower_valid;
+  assign upper_accept     = fifo_upper_valid & fifo_upper_ready;
+  assign lower_accept     = fifo_lower_valid & fifo_lower_ready;
+  assign have_upper       = pending_upper_valid | upper_accept;
+  assign have_lower       = pending_lower_valid | lower_accept;
+  assign pair_fire        = have_upper & have_lower;
 
   // ===| Pipeline register stage |==============================================
-  //   Fires only when both channels deliver valid data in the same cycle,
-  //   which is how the upstream scheduler is supposed to pair them for W4A8
-  //   dual-MAC. A misalignment starves the array of valid pairs, so the
-  //   valid is an AND, not an OR.
+  //   Fires when both channels have a beat, either from the current inputs or
+  //   from a pending early beat. This keeps the downstream PE array paired even
+  //   when the independent HP FIFOs expose a small valid skew.
   always_ff @(posedge clk) begin
     if (!rst_n) begin
       weight_valid <= 1'b0;
+      pending_upper_valid <= 1'b0;
+      pending_lower_valid <= 1'b0;
       for (int i = 0; i < weight_cnt; i++) begin
         weight_upper[i] <= '0;
         weight_lower[i] <= '0;
+        pending_upper[i] <= '0;
+        pending_lower[i] <= '0;
       end
     end else begin
-      weight_valid <= fifo_upper_valid & fifo_lower_valid;
-      for (int i = 0; i < weight_cnt; i++) begin
-        weight_upper[i] <= fifo_upper[i];
-        weight_lower[i] <= fifo_lower[i];
+      weight_valid <= pair_fire;
+
+      if (pair_fire) begin
+        pending_upper_valid <= 1'b0;
+        pending_lower_valid <= 1'b0;
+        for (int i = 0; i < weight_cnt; i++) begin
+          weight_upper[i] <= pending_upper_valid ? pending_upper[i] : fifo_upper[i];
+          weight_lower[i] <= pending_lower_valid ? pending_lower[i] : fifo_lower[i];
+        end
+      end else begin
+        if (upper_accept) begin
+          pending_upper_valid <= 1'b1;
+          for (int i = 0; i < weight_cnt; i++) begin
+            pending_upper[i] <= fifo_upper[i];
+          end
+        end
+        if (lower_accept) begin
+          pending_lower_valid <= 1'b1;
+          for (int i = 0; i < weight_cnt; i++) begin
+            pending_lower[i] <= fifo_lower[i];
+          end
+        end
       end
     end
   end
