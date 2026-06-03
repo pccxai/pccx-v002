@@ -308,16 +308,22 @@ module pccx_npu_top (
   );
 
   // ===| [7] Result Normalizers (one per systolic column) |======================
+  logic signed [`DSP48E2_POUT_SIZE-1:0] recovered_res_sum[0:`ARRAY_SIZE_H-1];
   logic [`BF16_WIDTH-1:0] norm_res_seq      [0:`ARRAY_SIZE_H-1];
   logic                   norm_res_seq_valid[0:`ARRAY_SIZE_H-1];
 
   genvar n;
   generate
     for (n = 0; n < `ARRAY_SIZE_H; n++) begin : gen_norm
+      GEMM_dual_mac_recover u_dual_mac_recover (
+          .in_p_accum(raw_res_sum[n]),
+          .out_sum   (recovered_res_sum[n])
+      );
+
       gemm_result_normalizer u_norm_seq (
           .clk      (clk_core),
           .rst_n    (rst_n_core),
-          .data_in  (raw_res_sum[n]),
+          .data_in  (recovered_res_sum[n]),
           .e_max    (delayed_emax_32[n]),
           .valid_in (raw_res_sum_valid[n]),
           .data_out (norm_res_seq[n]),
