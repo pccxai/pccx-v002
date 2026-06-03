@@ -91,6 +91,31 @@ module mem_dispatcher #(
   assign OUT_fifo_full = acp_cmd_fifo_full | npu_cmd_fifo_full;
   assign OUT_cvo_busy  = cvo_bridge_busy;
 
+  // Keep module-boundary AXIS interface ports from being passed through as
+  // opaque interface handles. Vivado/xsim can otherwise expose tready while
+  // dropping input tvalid/tdata across a nested interface boundary.
+  axis_if #(.DATA_WIDTH(128)) S_AXIS_ACP_FMAP_WIRE ();
+  axis_if #(.DATA_WIDTH(128)) M_AXIS_ACP_RESULT_WIRE ();
+  axis_if #(.DATA_WIDTH(128)) M_AXIS_L1_FMAP_WIRE ();
+
+  assign S_AXIS_ACP_FMAP_WIRE.tdata  = S_AXIS_ACP_FMAP.tdata;
+  assign S_AXIS_ACP_FMAP_WIRE.tvalid = S_AXIS_ACP_FMAP.tvalid;
+  assign S_AXIS_ACP_FMAP_WIRE.tlast  = S_AXIS_ACP_FMAP.tlast;
+  assign S_AXIS_ACP_FMAP_WIRE.tkeep  = S_AXIS_ACP_FMAP.tkeep;
+  assign S_AXIS_ACP_FMAP.tready      = S_AXIS_ACP_FMAP_WIRE.tready;
+
+  assign M_AXIS_ACP_RESULT.tdata        = M_AXIS_ACP_RESULT_WIRE.tdata;
+  assign M_AXIS_ACP_RESULT.tvalid       = M_AXIS_ACP_RESULT_WIRE.tvalid;
+  assign M_AXIS_ACP_RESULT.tlast        = M_AXIS_ACP_RESULT_WIRE.tlast;
+  assign M_AXIS_ACP_RESULT.tkeep        = M_AXIS_ACP_RESULT_WIRE.tkeep;
+  assign M_AXIS_ACP_RESULT_WIRE.tready  = M_AXIS_ACP_RESULT.tready;
+
+  assign M_AXIS_L1_FMAP.tdata        = M_AXIS_L1_FMAP_WIRE.tdata;
+  assign M_AXIS_L1_FMAP.tvalid       = M_AXIS_L1_FMAP_WIRE.tvalid;
+  assign M_AXIS_L1_FMAP.tlast        = M_AXIS_L1_FMAP_WIRE.tlast;
+  assign M_AXIS_L1_FMAP.tkeep        = M_AXIS_L1_FMAP_WIRE.tkeep;
+  assign M_AXIS_L1_FMAP_WIRE.tready  = M_AXIS_L1_FMAP.tready;
+
   // ===| Shape Constant RAM — FMap |=============================================
   // Split write- and read-side pointers so the MEMSET handler (write side)
   // and the LOAD-uop handler (read side) drive independent flops; sharing a
@@ -623,6 +648,7 @@ module mem_dispatcher #(
 
   logic [127:0] npu_l2_wdata;
   logic [127:0] npu_l2_rdata;
+  logic         cvo_direct_owner;
   logic         final_npu_direct_en;
   logic         final_npu_direct_valid;
   logic         final_npu_direct_we;
@@ -630,25 +656,24 @@ module mem_dispatcher #(
   logic [127:0] final_npu_direct_wdata;
 
   assign npu_l2_wdata = '0;
+  assign cvo_direct_owner = IN_cvo_uop_valid | cvo_bridge_busy;
 
   // Route L2 rdata to the appropriate consumer
   assign cvo_l2_rdata = npu_l2_rdata;  // shared read bus
 
   always_comb begin
-    final_npu_direct_en    = 1'b0;
+    final_npu_direct_en    = cvo_direct_owner | store_l2_valid;
     final_npu_direct_valid = 1'b0;
     final_npu_direct_we    = 1'b0;
     final_npu_direct_addr  = '0;
     final_npu_direct_wdata = '0;
 
     if (cvo_bridge_busy) begin
-      final_npu_direct_en    = 1'b1;
       final_npu_direct_valid = cvo_l2_valid;
       final_npu_direct_we    = cvo_l2_we;
       final_npu_direct_addr  = cvo_l2_addr;
       final_npu_direct_wdata = cvo_l2_wdata;
     end else if (store_l2_valid) begin
-      final_npu_direct_en    = 1'b1;
       final_npu_direct_valid = store_l2_valid;
       final_npu_direct_we    = store_l2_we;
       final_npu_direct_addr  = store_l2_addr;
@@ -662,9 +687,9 @@ module mem_dispatcher #(
       .clk_axi   (clk_axi),
       .rst_axi_n (rst_axi_n),
 
-      .S_AXIS_ACP_FMAP  (S_AXIS_ACP_FMAP),
-      .M_AXIS_ACP_RESULT(M_AXIS_ACP_RESULT),
-      .M_AXIS_NPU_FMAP  (M_AXIS_L1_FMAP),
+      .S_AXIS_ACP_FMAP  (S_AXIS_ACP_FMAP_WIRE),
+      .M_AXIS_ACP_RESULT(M_AXIS_ACP_RESULT_WIRE),
+      .M_AXIS_NPU_FMAP  (M_AXIS_L1_FMAP_WIRE),
 
       // ACP control
       .IN_acp_write_en (OUT_acp_cmd.write_en),

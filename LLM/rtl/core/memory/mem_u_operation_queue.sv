@@ -22,7 +22,7 @@ import perf_counter_pkg::*;
 //                back-pressuring the upstream scheduler).
 // Uop layout   : acp_uop_t / npu_uop_t are 35-bit packed structs:
 //                  {write_en[0], base_addr[16:0], end_addr[16:0]} = 1+17+17 = 35.
-// Latency      : 1 BRAM cycle from wr_en → dout (READ_MODE = "std").
+// Latency      : FWFT command output; OUT_*_cmd is valid with OUT_*_cmd_valid.
 // Throughput   : 1 push + 1 pop per channel per cycle (independent channels).
 // Handshake    : OUT_*_cmd_valid asserts when (~busy && ~empty); pop fires
 //                continuously while consumer is idle.
@@ -97,7 +97,8 @@ module mem_u_operation_queue #(
       .WRITE_DATA_WIDTH  (UopWidth),
       .READ_DATA_WIDTH   (UopWidth),
       .FIFO_MEMORY_TYPE  ("block"),
-      .READ_MODE         ("std"),
+      .READ_MODE         ("fwft"),
+      .FIFO_READ_LATENCY (0),
       .FULL_RESET_VALUE  (0),
       .PROG_FULL_THRESH  (ProgFullThresh)
   ) u_acp_uop_fifo (
@@ -118,7 +119,8 @@ module mem_u_operation_queue #(
       .WRITE_DATA_WIDTH  (UopWidth),
       .READ_DATA_WIDTH   (UopWidth),
       .FIFO_MEMORY_TYPE  ("block"),
-      .READ_MODE         ("std"),
+      .READ_MODE         ("fwft"),
+      .FIFO_READ_LATENCY (0),
       .FULL_RESET_VALUE  (0),
       .PROG_FULL_THRESH  (ProgFullThresh)
   ) u_npu_uop_fifo (

@@ -2,6 +2,7 @@
 // SPDX-FileCopyrightText: 2026 Hyun Woo Kim
 // SPDX-License-Identifier: Apache-2.0
 
+`timescale 1ns / 1ps
 `include "GLOBAL_CONST.svh"
 
 `ifndef NPU_INTERFACES_SVH
